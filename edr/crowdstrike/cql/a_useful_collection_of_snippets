@@ -1,0 +1,47 @@
+// Exclude any Private IP Addresses
+| !cidr(field=RemoteAddressIP4, subnet=["224.0.0.0/4", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/32", "169.254.0.0/16", "0.0.0.0/32"])
+
+*******************************************************************************
+// Rename IP Location Data
+| rename([[RemoteAddressIP4.country, destCountry], [RemoteAddressIP4.city, destCity], [RemoteAddressIP4.state, destState], [RemoteAddressIP4.lat, destLat], [RemoteAddressIP4.lon, destLon]])
+
+*******************************************************************************
+// Some NetworkConnectIP4 Enrichment
+| case{
+      Protocol=0 | Protocol_String:="IP";
+      Protocol=1 | Protocol_String:="ICMP";
+      Protocol=2 | Protocol_String:="IGMP";
+      Protocol=6 | Protocol_String:="TCP";
+      Protocol=17 | Protocol_String:="UDP";
+      Protocol=41 | Protocol_String:="IPV6";
+      Protocol=47 | Protocol_String:="GRE";
+      Protocol=58 | Protocol_String:="ICMPV6";
+      Protocol=255 | Protocol_String:="UNKNOWN";
+    }
+    | case{
+      ConnectionDirection=0 | ConnectionDirection := "OUTBOUND";
+      ConnectionDirection=1 | ConnectionDirection := "INBOUND";
+      ConnectionDirection=2 | ConnectionDirection := "NEITHER";
+      ConnectionDirection=3 | ConnectionDirection := "BOTH";
+      ConnectionDirection=4 | ConnectionDirection := "UNKNOWN";
+    }
+
+*******************************************************************************
+
+//Mapping Process Injection
+
+#event_simpleName=ProcessInjection
+| regex(field=InjecteeImageFileName, regex="(?<Injectee>\\w+\\.exe)")
+| regex(field=InjectorImageFileName, regex="(?<Injector>\\w+\\.exe)")
+| format("%s -> %s", field=[Injector, Injectee], as=InjectTree)
+| Injector=/roblox/iF OR Injectee=/roblox/iF
+| groupBy([ComputerName, aid], function=[count(), collect([InjectTree, ModuleName, Tactic, Technique, InjectorImageFileName, InjecteeImageFileName])])
+| sort(_count, order=desc, limit=max)
+
+*******************************************************************************
+
+*******************************************************************************
+
+*******************************************************************************
+
+*******************************************************************************
