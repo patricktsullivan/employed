@@ -11,7 +11,7 @@ import json
 from falconpy import IOAExclusions
 
 CLIENT_ID = ""
-CLIENT_SECRET = "b"
+CLIENT_SECRET = ""
 
 RUN_TIME = datetime.datetime.now().strftime("%Y%m%d_%H-%M-%S")
 OUTPUT_PATH = f"/Users/psullivan/Documents/Projects/scripting/CrowdStrike/Auditing/Output/"

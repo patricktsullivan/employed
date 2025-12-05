@@ -1,5 +1,7 @@
 data
 logging
+workmac
 *.log
 *.csv
 *.json
+.ds_store
