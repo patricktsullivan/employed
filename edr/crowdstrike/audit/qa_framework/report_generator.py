@@ -266,7 +266,7 @@ def _build_finding_card(finding: dict) -> str:
                             <div class="res-label">Analyst Decision</div>
                             <div class="res-value">{_format_resolution(new_res)}</div>
                         </div>
-                        <div class="resolution-arrow">â†’</div>
+                        <div class="resolution-arrow">→</div>
                         <div class="resolution historical">
                             <div class="res-label">Historical Consensus</div>
                             <div class="res-value">{_format_resolution(hist_res)}</div>
@@ -289,7 +289,7 @@ def _build_finding_card(finding: dict) -> str:
             </div>
             
             <div class="finding-footer">
-                <a href="{falcon_link}" target="_blank" class="falcon-link">View in Falcon â†’</a>
+                <a href="{falcon_link}" target="_blank" class="falcon-link">View in Falcon →</a>
             </div>
         </div>
     """
@@ -399,7 +399,7 @@ def _build_process_chain(
     if filename:
         parts.append(f'<span class="process current" title="Detection target">{filename}</span>')
     
-    chain_html = ' <span class="chain-arrow">â†’</span> '.join(parts) if parts else '<em>No process information</em>'
+    chain_html = ' <span class="chain-arrow">→</span> '.join(parts) if parts else '<em>No process information</em>'
     
     cmdline_html = ""
     if cmdline:
