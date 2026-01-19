@@ -203,7 +203,7 @@ Update the 1Password references to match your vault structure:
 CROWDSTRIKE = CrowdStrikeConfig(
     client_id=op_read("op://YourVault/CrowdStrike/client_id"),
     client_secret=op_read("op://YourVault/CrowdStrike/client_secret"),
-    base_url="https://api.crowdstrike.com"  # Change for your region
+    base_url="https://api.laggar.gcw.crowdstrike.com"  # Change for your region
 )
 ```
 
@@ -503,7 +503,7 @@ The test files include:
 - **test_consensus.py**: Tests for consensus calculation and contradiction detection
 - **test_similarity.py**: Tests for fuzzy template matching
 - **test_alerts_client.py**: Tests for CrowdStrike API interactions (mocked)
-- **test_reports_generator.py**: Tests for HTML and JSON report generation
+- **test_report_generator.py**: Tests for HTML and JSON report generation
 
 ## Tuning and Maintenance
 

@@ -156,8 +156,6 @@ class Sanitizer:
         if not text:
             return ""
 
-        # result = text.lower()
-
         # First pass: replace well-known SIDs with readable names
         result = cls._replace_well_known_sids(text)
 
