@@ -1,4 +1,4 @@
-# ngsiem-hunter
+# arbitrary-queries
 
 A Python CLI tool for running CrowdStrike NG-SIEM queries across multiple tenant environments (CIDs). Designed for MSSPs managing 200+ CrowdStrike environments through a parent-child hierarchy.
 
@@ -33,7 +33,7 @@ A Python CLI tool for running CrowdStrike NG-SIEM queries across multiple tenant
 ```bash
 # Clone the repository
 git clone <repository-url>
-cd ngsiem-hunter
+cd arbitrary-queries
 
 # Install with pip (editable mode for development)
 pip install -e ".[dev]"
@@ -86,13 +86,13 @@ Place NG-SIEM query files in the `queries/` directory:
 
 ```bash
 # Run a query across all CIDs in batch mode (default)
-ngsiem-hunter -q queries/suspicious_powershell.txt
+arbitrary-queries -q queries/suspicious_powershell.txt
 
 # Run in iterative mode (separate query per CID)
-ngsiem-hunter -q queries/hunt.txt -m iterative
+arbitrary-queries -q queries/hunt.txt -m iterative
 
 # Verbose output
-ngsiem-hunter -q queries/hunt.txt -v
+arbitrary-queries -q queries/hunt.txt -v
 ```
 
 ### Filtering CIDs
@@ -107,32 +107,32 @@ Beta Industries
 ```
 
 ```bash
-ngsiem-hunter -q queries/hunt.txt --cids data/targets.txt
+arbitrary-queries -q queries/hunt.txt --cids data/targets.txt
 ```
 
 ### Custom Time Range
 
 ```bash
 # Last 24 hours
-ngsiem-hunter -q queries/hunt.txt -s "-24h"
+arbitrary-queries -q queries/hunt.txt -s "-24h"
 
 # Specific range
-ngsiem-hunter -q queries/hunt.txt -s "-7d" -e "-1d"
+arbitrary-queries -q queries/hunt.txt -s "-7d" -e "-1d"
 
 # Custom format
-ngsiem-hunter -q queries/hunt.txt -s "2024-01-01T00:00:00Z" -e "2024-01-07T23:59:59Z"
+arbitrary-queries -q queries/hunt.txt -s "2024-01-01T00:00:00Z" -e "2024-01-07T23:59:59Z"
 ```
 
 ### Custom Configuration
 
 ```bash
-ngsiem-hunter -q queries/hunt.txt -c config/production.yaml
+arbitrary-queries -q queries/hunt.txt -c config/production.yaml
 ```
 
 ## CLI Reference
 
 ```
-Usage: ngsiem-hunter [OPTIONS]
+Usage: arbitrary-queries [OPTIONS]
 
 Options:
   -c, --config PATH    Configuration file path [default: ./config/settings.json]
@@ -213,8 +213,8 @@ pytest tests/test_client.py -v
 ### Project Structure
 
 ```
-ngsiem-hunter/
-├── src/ngsiem_hunter/
+arbitrary-queries/
+├── src/
 │   ├── __init__.py       # Package version
 │   ├── models.py         # Data classes
 │   ├── secrets.py        # 1Password integration
@@ -259,11 +259,3 @@ eval $(op signin)
 
 - Reduce `max_concurrent_queries` in configuration
 - Increase `retry_delay_seconds`
-
-## License
-
-[Your License Here]
-
-## Contributing
-
-[Contribution Guidelines]
