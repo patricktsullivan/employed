@@ -1,0 +1,12 @@
+{
+  "abc123def456abc123def456abc12345": "Acme Corporation",
+  "def456abc123def456abc123def45678": "Beta Industries",
+  "789abc123def456abc123def456abc12": "Gamma Healthcare",
+  "456def789abc123def456abc123def45": "Delta Financial",
+  "123abc456def789abc123def456abc12": "Epsilon Manufacturing",
+  "789def123abc456def789abc123def45": "Zeta Retail",
+  "abc789def123abc456def789abc12345": "Eta Technology",
+  "def123abc789def123abc456def78901": "Theta Logistics",
+  "123def456abc789def123abc456def78": "Iota Energy",
+  "456abc789def123abc456def789abc12": "Kappa Media"
+}

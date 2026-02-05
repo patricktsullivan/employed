@@ -1,0 +1,9 @@
+// Example NG-SIEM Hunt Query: Suspicious PowerShell Activity
+// This query looks for potentially malicious PowerShell execution patterns
+// across all target CIDs in the specified time range.
+
+#event_simpleName=/ProcessRollup2|SyntheticProcessRollup2/
+| ImageFileName=/powershell\.exe$/i
+| CommandLine=/(-enc|-encodedcommand|-e\s|bypass|hidden|noprofile|downloadstring|invoke-expression|iex\s|\.\s*\()/i
+| groupBy([cid, aid, ComputerName, UserName, CommandLine], function=count())
+| sort(_count, order=desc, limit=1000)
