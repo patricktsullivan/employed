@@ -1,5 +1,0 @@
-max_concurrent_searches: 10
-search_window_days: "7d"
-default_repository: "search-all"
-output_folder: "reports"
-poll_interval_seconds: 10
