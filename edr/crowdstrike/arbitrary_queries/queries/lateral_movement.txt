@@ -1,8 +1,0 @@
-// Example NG-SIEM Hunt Query: Potential Lateral Movement
-// Detects remote service creation and PsExec-like activity
-
-#event_simpleName=/RemoteServiceCreation|AsepServiceCreation/
-| in(field=SourceEndpointIpAddress, values=["10.*", "192.168.*", "172.16.*"])
-| TargetEndpointIpAddress != SourceEndpointIpAddress
-| groupBy([cid, SourceEndpointHostName, TargetEndpointHostName, ServiceName, UserName], function=count())
-| sort(_count, order=desc, limit=500)
