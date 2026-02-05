@@ -1,0 +1,11 @@
+# Example CID Filter File
+# Lines starting with # are comments
+# You can specify CIDs by their ID or by customer name
+
+# By CID identifier
+abc123def456abc123def456abc12345
+def456abc123def456abc123def45678
+
+# By customer name (must match cid_registry.json)
+Gamma Healthcare
+Delta Financial

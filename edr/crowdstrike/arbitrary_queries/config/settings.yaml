@@ -1,0 +1,42 @@
+# ngsiem-hunter Configuration
+# YAML alternative to settings.json
+
+# OnePassword references for CrowdStrike API credentials
+# Edit these to match your 1Password vault structure
+onepassword:
+  client_id_ref: "op://YourVault/CrowdStrike-Parent/client_id"
+  client_secret_ref: "op://YourVault/CrowdStrike-Parent/client_secret"
+
+# CrowdStrike API configuration
+crowdstrike:
+  # US-GOV-1 cloud base URL
+  base_url: "https://api.laggar.gcw.crowdstrike.com"
+  # Repository for NG-SIEM queries
+  repository: "search-all"
+
+# Default query parameters
+query_defaults:
+  # Time range for queries (e.g., -7d, -24h, -1h)
+  time_range: "-7d"
+  # Polling interval in seconds when waiting for query completion
+  poll_interval_seconds: 60
+  # Maximum time to wait for a query to complete
+  timeout_seconds: 3600
+
+# Concurrency and retry settings
+concurrency:
+  # Maximum number of concurrent queries (for iterative mode)
+  max_concurrent_queries: 50
+  # Number of retry attempts for failed queries
+  retry_attempts: 3
+  # Delay between retries in seconds
+  retry_delay_seconds: 5
+
+# File paths (relative to project root)
+paths:
+  # JSON file mapping CIDs to customer names
+  cid_registry_path: "./data/cid_registry.json"
+  # Directory containing query files
+  queries_dir: "./queries"
+  # Directory for CSV output files
+  output_dir: "./output"

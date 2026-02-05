@@ -1,0 +1,25 @@
+{
+  "onepassword": {
+    "client_id_ref": "op://YourVault/CrowdStrike/client_id",
+    "client_secret_ref": "op://YourVault/CrowdStrike/client_secret"
+  },
+  "crowdstrike": {
+    "base_url": "https://api.laggar.gcw.crowdstrike.com",
+    "repository": "search-all"
+  },
+  "query_defaults": {
+    "time_range": "-7d",
+    "poll_interval_seconds": 60,
+    "timeout_seconds": 3600
+  },
+  "concurrency": {
+    "max_concurrent_queries": 50,
+    "retry_attempts": 3,
+    "retry_delay_seconds": 5
+  },
+  "paths": {
+    "cid_registry": "./data/cid_registry.json",
+    "queries_dir": "./queries",
+    "output_dir": "./output"
+  }
+}
