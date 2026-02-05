@@ -6,7 +6,6 @@ Tests configuration loading from JSON, YAML, and Python files.
 
 import pytest
 import json
-import tempfile
 from pathlib import Path
 
 from arbitrary_queries.config import (
