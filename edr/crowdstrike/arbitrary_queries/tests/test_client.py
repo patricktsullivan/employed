@@ -110,10 +110,14 @@ class TestCrowdStrikeClientInit:
             )
             after = datetime.now(timezone.utc)
             
+            # Token expiry should be set (not None)
+            assert client._token_expires_at is not None
+            
             # Token expiry should be ~1800 - 60 = 1740 seconds from now
             expected_min = before + timedelta(seconds=1800 - TOKEN_REFRESH_BUFFER_SECONDS - 1)
             expected_max = after + timedelta(seconds=1800 - TOKEN_REFRESH_BUFFER_SECONDS + 1)
             
+
             assert expected_min <= client._token_expires_at <= expected_max
 
     def test_client_init_auth_failure(self, mock_credentials, mock_cs_config):
