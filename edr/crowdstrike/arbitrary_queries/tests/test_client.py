@@ -22,6 +22,13 @@ from arbitrary_queries.secrets import Credentials
 from arbitrary_queries.config import CrowdStrikeConfig
 
 
+class MockResult:
+    """Mock Result object for testing."""
+    def __init__(self, status_code: int, body: dict):
+        self.status_code = status_code
+        self.body = body
+
+
 @pytest.fixture
 def mock_credentials():
     """Mock CrowdStrike credentials."""
@@ -44,13 +51,12 @@ def mock_cs_config():
 def mock_oauth():
     """Mock OAuth2 client that returns valid tokens."""
     with patch("arbitrary_queries.client.OAuth2") as mock:
-        mock_instance = MagicMock()
-        mock_instance.token.return_value = {
-            "status_code": 201,
-            "body": {"access_token": "test-token", "expires_in": 1800},
-        }
-        mock.return_value = mock_instance
-        yield mock
+        with patch("arbitrary_queries.client.Result", MockResult):
+            mock_instance = MagicMock()
+            mock_result = MockResult(status_code=201, body={"access_token": "test-token", "expires_in": 1800})
+            mock_instance.token.return_value = mock_result
+            mock.return_value = mock_instance
+            yield mock
 
 
 @pytest.fixture
@@ -78,65 +84,78 @@ class TestCrowdStrikeClientInit:
     def test_client_init_authenticates(self, mock_credentials, mock_cs_config):
         """Client should authenticate on initialization."""
         with patch("arbitrary_queries.client.OAuth2") as mock_oauth:
-            mock_instance = MagicMock()
-            mock_instance.token.return_value = {
-                "status_code": 201,
-                "body": {"access_token": "my-token", "expires_in": 1800},
-            }
-            mock_oauth.return_value = mock_instance
-            
-            client = CrowdStrikeClient(
-                credentials=mock_credentials,
-                config=mock_cs_config,
-            )
-            
-            mock_oauth.assert_called_once()
-            assert client._access_token == "my-token"
+            with patch("arbitrary_queries.client.Result", MockResult):
+                mock_instance = MagicMock()
+                mock_result = MockResult(status_code=201, body={"access_token": "my-token", "expires_in": 1800})
+                mock_instance.token.return_value = mock_result
+                mock_oauth.return_value = mock_instance
+                
+                client = CrowdStrikeClient(
+                    credentials=mock_credentials,
+                    config=mock_cs_config,
+                )
+                
+                mock_oauth.assert_called_once()
+                assert client._access_token == "my-token"
 
     def test_client_init_sets_token_expiry_with_buffer(self, mock_credentials, mock_cs_config):
         """Client should set token expiry with refresh buffer."""
         with patch("arbitrary_queries.client.OAuth2") as mock_oauth:
-            mock_instance = MagicMock()
-            mock_instance.token.return_value = {
-                "status_code": 201,
-                "body": {"access_token": "token", "expires_in": 1800},
-            }
-            mock_oauth.return_value = mock_instance
-            
-            before = datetime.now(timezone.utc)
-            client = CrowdStrikeClient(
-                credentials=mock_credentials,
-                config=mock_cs_config,
-            )
-            after = datetime.now(timezone.utc)
-            
-            # Token expiry should be set (not None)
-            assert client._token_expires_at is not None
-            
-            # Token expiry should be ~1800 - 60 = 1740 seconds from now
-            expected_min = before + timedelta(seconds=1800 - TOKEN_REFRESH_BUFFER_SECONDS - 1)
-            expected_max = after + timedelta(seconds=1800 - TOKEN_REFRESH_BUFFER_SECONDS + 1)
-            
-
-            assert expected_min <= client._token_expires_at <= expected_max
+            with patch("arbitrary_queries.client.Result", MockResult):
+                mock_instance = MagicMock()
+                mock_result = MockResult(status_code=201, body={"access_token": "token", "expires_in": 1800})
+                mock_instance.token.return_value = mock_result
+                mock_oauth.return_value = mock_instance
+                
+                before = datetime.now(timezone.utc)
+                client = CrowdStrikeClient(
+                    credentials=mock_credentials,
+                    config=mock_cs_config,
+                )
+                after = datetime.now(timezone.utc)
+                
+                # Token expiry should be set (not None)
+                assert client._token_expires_at is not None
+                
+                # Token expiry should be ~1800 - 60 = 1740 seconds from now
+                expected_min = before + timedelta(seconds=1800 - TOKEN_REFRESH_BUFFER_SECONDS - 1)
+                expected_max = after + timedelta(seconds=1800 - TOKEN_REFRESH_BUFFER_SECONDS + 1)
+                
+                assert expected_min <= client._token_expires_at <= expected_max
 
     def test_client_init_auth_failure(self, mock_credentials, mock_cs_config):
         """Client should raise AuthenticationError on auth failure."""
         with patch("arbitrary_queries.client.OAuth2") as mock_oauth:
-            mock_instance = MagicMock()
-            mock_instance.token.return_value = {
-                "status_code": 401,
-                "body": {"errors": [{"message": "Invalid credentials"}]},
-            }
-            mock_oauth.return_value = mock_instance
-            
-            with pytest.raises(AuthenticationError) as exc_info:
-                CrowdStrikeClient(
-                    credentials=mock_credentials,
-                    config=mock_cs_config,
-                )
-            
-            assert "authentication" in str(exc_info.value).lower()
+            with patch("arbitrary_queries.client.Result", MockResult):
+                mock_instance = MagicMock()
+                mock_result = MockResult(status_code=401, body={"errors": [{"message": "Invalid credentials"}]})
+                mock_instance.token.return_value = mock_result
+                mock_oauth.return_value = mock_instance
+                
+                with pytest.raises(AuthenticationError) as exc_info:
+                    CrowdStrikeClient(
+                        credentials=mock_credentials,
+                        config=mock_cs_config,
+                    )
+                
+                assert "authentication" in str(exc_info.value).lower()
+
+    def test_client_init_unexpected_response_type(self, mock_credentials, mock_cs_config):
+        """Client should raise AuthenticationError for non-Result response."""
+        with patch("arbitrary_queries.client.OAuth2") as mock_oauth:
+            with patch("arbitrary_queries.client.Result", MockResult):
+                mock_instance = MagicMock()
+                # Return a plain dict instead of a Result object
+                mock_instance.token.return_value = {"status_code": 201, "body": {}}
+                mock_oauth.return_value = mock_instance
+                
+                with pytest.raises(AuthenticationError) as exc_info:
+                    CrowdStrikeClient(
+                        credentials=mock_credentials,
+                        config=mock_cs_config,
+                    )
+                
+                assert "unexpected response type" in str(exc_info.value).lower()
 
     def test_client_init_no_session(self, client):
         """Client should not create session on init."""
@@ -172,6 +191,7 @@ class TestAsyncContextManager:
             session = client._session
         
         assert client._session is None
+        assert session is not None
         assert session.closed
 
     @pytest.mark.asyncio
