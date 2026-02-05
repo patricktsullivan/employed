@@ -1,5 +1,5 @@
 """
-Configuration loading for NG-SIEM Hunter.
+Configuration loading for Arbitrary Queries.
 
 Supports loading configuration from JSON and YAML files.
 All configuration sections have sensible defaults except for
@@ -102,6 +102,12 @@ class Config:
     queries_dir: Path = field(default_factory=lambda: Path("./queries"))
     output_dir: Path = field(default_factory=lambda: Path("./output"))
 
+def _validate_op_reference(ref: str, field_name: str) -> None:
+    """Validate that a string looks like a 1Password reference."""
+    if not ref or not ref.startswith("op://"):
+        raise ConfigError(
+            f"Invalid {field_name}: must be a 1Password reference starting with 'op://', got: {ref!r}"
+        )
 
 def _parse_config_dict(data: dict[str, Any]) -> Config:
     """
@@ -129,6 +135,10 @@ def _parse_config_dict(data: dict[str, Any]) -> Config:
     except KeyError as e:
         raise ConfigError(f"Missing required OnePassword field: {e}")
     
+    # Validate format of references
+    _validate_op_reference(onepassword.client_id_ref, "client_id_ref")
+    _validate_op_reference(onepassword.client_secret_ref, "client_secret_ref")
+
     # CrowdStrike config with defaults
     cs_data = data.get("crowdstrike", {})
     crowdstrike = CrowdStrikeConfig(
@@ -154,7 +164,7 @@ def _parse_config_dict(data: dict[str, Any]) -> Config:
     
     # Paths
     paths_data = data.get("paths", {})
-    cid_registry_path = Path(paths_data.get("cid_registry", "./data/cid_registry.json"))
+    cid_registry_path = Path(paths_data.get("cid_registry_path", "./data/cid_registry.json"))
     queries_dir = Path(paths_data.get("queries_dir", "./queries"))
     output_dir = Path(paths_data.get("output_dir", "./output"))
     
