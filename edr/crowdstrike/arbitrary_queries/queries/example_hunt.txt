@@ -1,0 +1,2 @@
+// LogScale Query: Group process executions by ComputerName
+#event_simpleName="ProcessRollup2" | groupBy(ComputerName)
