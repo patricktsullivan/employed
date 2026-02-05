@@ -12,6 +12,7 @@ from typing import Any
 
 import aiohttp
 from falconpy import OAuth2
+from falconpy._result import Result
 
 from arbitrary_queries.secrets import Credentials
 from arbitrary_queries.config import CrowdStrikeConfig
@@ -118,12 +119,15 @@ class CrowdStrikeClient:
         """
         response = self._oauth.token()
         
-        if response["status_code"] not in (200, 201):
-            errors = response.get("body", {}).get("errors", [])
+        if not isinstance(response, Result):
+            raise AuthenticationError(f"Unexpected response type from OAuth2: {type(response)}")
+        
+        if response.status_code not in (200, 201):
+            errors = response.body.get("errors", [])
             error_msg = errors[0].get("message", "Unknown error") if errors else "Unknown error"
             raise AuthenticationError(f"Authentication failed: {error_msg}")
         
-        body = response["body"]
+        body = response.body
         self._access_token = body["access_token"]
         expires_in = body.get("expires_in", 1800)
         self._token_expires_at = (
