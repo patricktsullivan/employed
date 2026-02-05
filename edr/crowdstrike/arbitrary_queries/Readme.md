@@ -223,7 +223,7 @@ arbitrary-queries/
 │   ├── query_executor.py # Async query execution
 │   ├── output.py         # CSV and summary generation
 │   ├── runner.py         # Main orchestration
-│   └── cli.py            # Click CLI
+│   └── cli.py            # CLI (argparse)
 ├── tests/                # Test suite (111 tests)
 ├── config/               # Configuration files
 ├── queries/              # Query files
