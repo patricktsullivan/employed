@@ -2,7 +2,12 @@
 Data models for NG-SIEM Hunter.
 
 Contains data classes for query results, job tracking, and execution summaries.
-All models are immutable (frozen) for thread safety during concurrent execution.
+
+Thread Safety:
+    Most models are immutable (frozen) for thread safety during concurrent execution.
+    The exception is QueryJob, which requires mutable state for status updates during
+    query polling. When sharing QueryJob instances across threads, external
+    synchronization is required.
 """
 
 from dataclasses import dataclass, field
@@ -37,7 +42,7 @@ class QueryJobStatus(Enum):
         )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class CIDInfo:
     """
     Information about a CrowdStrike Customer ID (CID).
@@ -51,13 +56,19 @@ class CIDInfo:
     name: str
     
     def __str__(self) -> str:
-        return f"CIDInfo(cid={self.cid}, name={self.name})"
+        """Return user-friendly string representation."""
+        return f"{self.name} ({self.cid})"
 
 
-@dataclass
+@dataclass(slots=True)
 class QueryJob:
     """
     Tracks an in-flight NG-SIEM query job.
+    
+    Note:
+        This class is intentionally NOT frozen to allow status updates during
+        query polling. When sharing instances across threads, use external
+        synchronization.
     
     Attributes:
         job_id: The unique job ID returned by CrowdStrike.
@@ -94,7 +105,7 @@ class QueryJob:
         return delta.total_seconds()
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class QueryResult:
     """
     Results from a completed query for a single CID.
@@ -104,32 +115,48 @@ class QueryResult:
         cid_name: Human-readable customer name.
         events: List of event dictionaries returned by the query.
         record_count: Total number of records returned.
+    
+    Raises:
+        ValueError: If record_count doesn't match len(events).
     """
     
     cid: str
     cid_name: str
-    events: list[dict[str, Any]]
+    events: tuple[dict[str, Any], ...]  # Tuple for true immutability
     record_count: int
+    
+    def __post_init__(self) -> None:
+        """Validate that record_count matches events length."""
+        if self.record_count != len(self.events):
+            raise ValueError(
+                f"record_count ({self.record_count}) must match "
+                f"len(events) ({len(self.events)})"
+            )
     
     @property
     def is_empty(self) -> bool:
         """Return True if no events were returned."""
-        return self.record_count == 0
+        return len(self.events) == 0
     
-    def preview(self, count: int = 10) -> list[dict[str, Any]]:
+    def preview(self, count: int = 10) -> tuple[dict[str, Any], ...]:
         """
         Return first N events for preview display.
         
         Args:
-            count: Maximum number of events to return.
+            count: Maximum number of events to return. Must be non-negative.
             
         Returns:
-            List of up to `count` events.
+            Tuple of up to `count` events.
+        
+        Raises:
+            ValueError: If count is negative.
         """
+        if count < 0:
+            raise ValueError(f"count must be non-negative, got {count}")
         return self.events[:count]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class QuerySummary:
     """
     Execution summary for a single CID query.
@@ -141,7 +168,10 @@ class QuerySummary:
         execution_time_seconds: How long the query took.
         status: Final status of the query.
         error: Error message if query failed.
-        warnings: List of warning messages.
+        warnings: Tuple of warning messages (immutable).
+    
+    Raises:
+        ValueError: If record_count or execution_time_seconds is negative.
     """
     
     cid: str
@@ -150,7 +180,16 @@ class QuerySummary:
     execution_time_seconds: float
     status: QueryJobStatus
     error: str | None = None
-    warnings: list[str] = field(default_factory=list)
+    warnings: tuple[str, ...] = field(default_factory=tuple)  # Tuple for true immutability
+    
+    def __post_init__(self) -> None:
+        """Validate non-negative numeric fields."""
+        if self.record_count < 0:
+            raise ValueError(f"record_count must be non-negative, got {self.record_count}")
+        if self.execution_time_seconds < 0:
+            raise ValueError(
+                f"execution_time_seconds must be non-negative, got {self.execution_time_seconds}"
+            )
     
     @property
     def has_error(self) -> bool:
@@ -158,7 +197,7 @@ class QuerySummary:
         return self.error is not None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class OverallSummary:
     """
     Aggregated summary across all queried CIDs.
@@ -170,7 +209,11 @@ class OverallSummary:
         total_records: Total records across all queries.
         total_execution_time_seconds: Total time for all queries.
         mode: Whether this was batch or iterative execution.
-        cid_summaries: Per-CID summaries (optional).
+        cid_summaries: Per-CID summaries (immutable tuple).
+    
+    Raises:
+        ValueError: If successful_cids + failed_cids != total_cids,
+                   or if any count is negative.
     """
     
     total_cids: int
@@ -179,7 +222,31 @@ class OverallSummary:
     total_records: int
     total_execution_time_seconds: float
     mode: ExecutionMode
-    cid_summaries: list[QuerySummary] = field(default_factory=list)
+    cid_summaries: tuple[QuerySummary, ...] = field(default_factory=tuple)  # Tuple for true immutability
+    
+    def __post_init__(self) -> None:
+        """Validate summary arithmetic and non-negative fields."""
+        # Validate non-negative values
+        if self.total_cids < 0:
+            raise ValueError(f"total_cids must be non-negative, got {self.total_cids}")
+        if self.successful_cids < 0:
+            raise ValueError(f"successful_cids must be non-negative, got {self.successful_cids}")
+        if self.failed_cids < 0:
+            raise ValueError(f"failed_cids must be non-negative, got {self.failed_cids}")
+        if self.total_records < 0:
+            raise ValueError(f"total_records must be non-negative, got {self.total_records}")
+        if self.total_execution_time_seconds < 0:
+            raise ValueError(
+                f"total_execution_time_seconds must be non-negative, "
+                f"got {self.total_execution_time_seconds}"
+            )
+        
+        # Validate arithmetic consistency
+        if self.successful_cids + self.failed_cids != self.total_cids:
+            raise ValueError(
+                f"successful_cids ({self.successful_cids}) + failed_cids ({self.failed_cids}) "
+                f"must equal total_cids ({self.total_cids})"
+            )
     
     @property
     def success_rate(self) -> float:
@@ -193,3 +260,106 @@ class OverallSummary:
         if self.total_cids == 0:
             return 0.0
         return (self.successful_cids / self.total_cids) * 100.0
+
+
+# Factory functions for easier construction with lists
+def create_query_result(
+    cid: str,
+    cid_name: str,
+    events: list[dict[str, Any]],
+) -> QueryResult:
+    """
+    Create a QueryResult from a list of events.
+    
+    Convenience factory that converts the events list to a tuple
+    and sets record_count automatically.
+    
+    Args:
+        cid: The CID that was queried.
+        cid_name: Human-readable customer name.
+        events: List of event dictionaries.
+    
+    Returns:
+        QueryResult with events as a tuple.
+    """
+    events_tuple = tuple(events)
+    return QueryResult(
+        cid=cid,
+        cid_name=cid_name,
+        events=events_tuple,
+        record_count=len(events_tuple),
+    )
+
+
+def create_query_summary(
+    cid: str,
+    cid_name: str,
+    record_count: int,
+    execution_time_seconds: float,
+    status: QueryJobStatus,
+    error: str | None = None,
+    warnings: list[str] | None = None,
+) -> QuerySummary:
+    """
+    Create a QuerySummary with optional list-based warnings.
+    
+    Convenience factory that converts the warnings list to a tuple.
+    
+    Args:
+        cid: The CID that was queried.
+        cid_name: Human-readable customer name.
+        record_count: Number of records returned.
+        execution_time_seconds: How long the query took.
+        status: Final status of the query.
+        error: Error message if query failed.
+        warnings: List of warning messages (will be converted to tuple).
+    
+    Returns:
+        QuerySummary with warnings as a tuple.
+    """
+    return QuerySummary(
+        cid=cid,
+        cid_name=cid_name,
+        record_count=record_count,
+        execution_time_seconds=execution_time_seconds,
+        status=status,
+        error=error,
+        warnings=tuple(warnings) if warnings else (),
+    )
+
+
+def create_overall_summary(
+    total_cids: int,
+    successful_cids: int,
+    failed_cids: int,
+    total_records: int,
+    total_execution_time_seconds: float,
+    mode: ExecutionMode,
+    cid_summaries: list[QuerySummary] | None = None,
+) -> OverallSummary:
+    """
+    Create an OverallSummary with optional list-based cid_summaries.
+    
+    Convenience factory that converts the cid_summaries list to a tuple.
+    
+    Args:
+        total_cids: Total number of CIDs queried.
+        successful_cids: Number of CIDs with successful queries.
+        failed_cids: Number of CIDs with failed queries.
+        total_records: Total records across all queries.
+        total_execution_time_seconds: Total time for all queries.
+        mode: Whether this was batch or iterative execution.
+        cid_summaries: List of per-CID summaries (will be converted to tuple).
+    
+    Returns:
+        OverallSummary with cid_summaries as a tuple.
+    """
+    return OverallSummary(
+        total_cids=total_cids,
+        successful_cids=successful_cids,
+        failed_cids=failed_cids,
+        total_records=total_records,
+        total_execution_time_seconds=total_execution_time_seconds,
+        mode=mode,
+        cid_summaries=tuple(cid_summaries) if cid_summaries else (),
+    )
