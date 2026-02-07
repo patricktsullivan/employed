@@ -1,5 +1,5 @@
 """
-Main orchestration for Abritrary Queries.
+Main orchestration for Arbitrary Queries.
 
 Coordinates configuration loading, client setup, query execution,
 and output generation.
