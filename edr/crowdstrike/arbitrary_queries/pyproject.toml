@@ -28,7 +28,6 @@ dependencies = [
     "crowdstrike-falconpy>=1.4.0",
     "aiohttp>=3.9.0",
     "pyyaml>=6.0",
-    "click>=8.1.0",
 ]
 
 [project.optional-dependencies]
