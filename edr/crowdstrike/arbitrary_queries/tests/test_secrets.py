@@ -8,7 +8,7 @@ import pytest
 from unittest.mock import patch, MagicMock
 import subprocess
 
-from secrets import (
+from arbitrary_queries.secrets import (
     op_read,
     get_credentials,
     OnePasswordError,
@@ -22,7 +22,7 @@ class TestOpRead:
 
     def test_op_read_success(self):
         """op_read should return secret value on success."""
-        with patch("secrets.subprocess.run") as mock_run:
+        with patch("arbitrary_queries.secrets.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(
                 stdout="my-secret-value\n",
                 stderr="",
@@ -36,7 +36,7 @@ class TestOpRead:
 
     def test_op_read_strips_whitespace(self):
         """op_read should strip whitespace from secret."""
-        with patch("secrets.subprocess.run") as mock_run:
+        with patch("arbitrary_queries.secrets.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(
                 stdout="  secret-with-spaces  \n",
                 stderr="",
@@ -49,7 +49,7 @@ class TestOpRead:
 
     def test_op_read_command_structure(self):
         """op_read should call op CLI with correct arguments."""
-        with patch("secrets.subprocess.run") as mock_run:
+        with patch("arbitrary_queries.secrets.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(
                 stdout="secret",
                 stderr="",
@@ -67,7 +67,7 @@ class TestOpRead:
 
     def test_op_read_custom_timeout(self):
         """op_read should accept custom timeout value."""
-        with patch("secrets.subprocess.run") as mock_run:
+        with patch("arbitrary_queries.secrets.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(
                 stdout="secret",
                 stderr="",
@@ -81,7 +81,7 @@ class TestOpRead:
 
     def test_op_read_raises_on_cli_error(self):
         """op_read should raise OnePasswordError on CLI failure."""
-        with patch("secrets.subprocess.run") as mock_run:
+        with patch("arbitrary_queries.secrets.subprocess.run") as mock_run:
             mock_run.side_effect = subprocess.CalledProcessError(
                 returncode=1,
                 cmd=["op", "read"],
@@ -95,7 +95,7 @@ class TestOpRead:
 
     def test_op_read_raises_when_cli_not_found(self):
         """op_read should raise OnePasswordError when op CLI is missing."""
-        with patch("secrets.subprocess.run") as mock_run:
+        with patch("arbitrary_queries.secrets.subprocess.run") as mock_run:
             mock_run.side_effect = FileNotFoundError()
 
             with pytest.raises(OnePasswordError) as exc_info:
@@ -106,7 +106,7 @@ class TestOpRead:
 
     def test_op_read_raises_on_timeout(self):
         """op_read should raise OnePasswordError when CLI times out."""
-        with patch("secrets.subprocess.run") as mock_run:
+        with patch("arbitrary_queries.secrets.subprocess.run") as mock_run:
             mock_run.side_effect = subprocess.TimeoutExpired(
                 cmd=["op", "read"],
                 timeout=30,
@@ -133,7 +133,7 @@ class TestOpRead:
 
     def test_op_read_accepts_section_in_path(self):
         """op_read should accept references with section names."""
-        with patch("secrets.subprocess.run") as mock_run:
+        with patch("arbitrary_queries.secrets.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(
                 stdout="secret",
                 stderr="",
@@ -146,7 +146,7 @@ class TestOpRead:
 
     def test_op_read_handles_not_signed_in_error(self):
         """op_read should provide helpful message when not signed in."""
-        with patch("secrets.subprocess.run") as mock_run:
+        with patch("arbitrary_queries.secrets.subprocess.run") as mock_run:
             mock_run.side_effect = subprocess.CalledProcessError(
                 returncode=1,
                 cmd=["op", "read"],
@@ -161,7 +161,7 @@ class TestOpRead:
 
     def test_op_read_handles_empty_stderr(self):
         """op_read should handle CalledProcessError with empty stderr."""
-        with patch("secrets.subprocess.run") as mock_run:
+        with patch("arbitrary_queries.secrets.subprocess.run") as mock_run:
             error = subprocess.CalledProcessError(
                 returncode=1,
                 cmd=["op", "read"],
@@ -222,10 +222,10 @@ class TestCredentials:
         )
 
         with pytest.raises(AttributeError):
-            creds.client_id = "new-client-id"
+            setattr(creds, "client_id", "new-client-id")
 
         with pytest.raises(AttributeError):
-            creds.client_secret = "new-secret"
+            setattr(creds, "client_secret", "new-secret")
 
     def test_credentials_is_hashable(self):
         """Frozen credentials should be hashable (can be used in sets/dicts)."""
@@ -273,7 +273,7 @@ class TestGetCredentials:
 
     def test_get_credentials_fetches_both_secrets(self):
         """get_credentials should fetch client_id and client_secret."""
-        with patch("secrets.op_read") as mock_op_read:
+        with patch("arbitrary_queries.secrets.op_read") as mock_op_read:
             mock_op_read.side_effect = [
                 "fetched-client-id",
                 "fetched-client-secret",
@@ -290,7 +290,7 @@ class TestGetCredentials:
 
     def test_get_credentials_calls_with_correct_refs(self):
         """get_credentials should pass correct references to op_read."""
-        with patch("secrets.op_read") as mock_op_read:
+        with patch("arbitrary_queries.secrets.op_read") as mock_op_read:
             mock_op_read.return_value = "secret"
 
             get_credentials(
@@ -304,7 +304,7 @@ class TestGetCredentials:
 
     def test_get_credentials_propagates_onepassword_error(self):
         """get_credentials should propagate OnePasswordError."""
-        with patch("secrets.op_read") as mock_op_read:
+        with patch("arbitrary_queries.secrets.op_read") as mock_op_read:
             mock_op_read.side_effect = OnePasswordError("vault locked")
 
             with pytest.raises(OnePasswordError) as exc_info:
@@ -325,7 +325,7 @@ class TestGetCredentials:
 
     def test_get_credentials_returns_immutable_credentials(self):
         """get_credentials should return immutable Credentials object."""
-        with patch("secrets.op_read") as mock_op_read:
+        with patch("arbitrary_queries.secrets.op_read") as mock_op_read:
             mock_op_read.return_value = "secret"
 
             creds = get_credentials(
@@ -334,4 +334,4 @@ class TestGetCredentials:
             )
 
             with pytest.raises(AttributeError):
-                creds.client_id = "modified"
+                setattr(creds, "client_id", "modified")
