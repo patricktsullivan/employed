@@ -204,7 +204,7 @@ Per-CID Results:
 pytest
 
 # With coverage
-pytest --cov=ngsiem_hunter --cov-report=html
+pytest --cov=arbitrary_queries --cov-report=html
 
 # Run specific test file
 pytest tests/test_client.py -v
