@@ -2,7 +2,8 @@
 Main orchestration for Arbitrary Queries.
 
 Coordinates configuration loading, client setup, query execution,
-and output generation.
+and output generation. This is the "glue" module that ties every other
+module together into a single end-to-end workflow.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ import asyncio
 import json
 import logging
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import AsyncIterator
@@ -38,16 +40,21 @@ from arbitrary_queries.secrets import Credentials, get_credentials
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True, slots=True)
 class CIDFilterResult:
-    """Result of loading a CID filter file."""
+    """
+    Result of loading a CID filter file.
     
-    def __init__(
-        self,
-        matched: list[CIDInfo],
-        unmatched: list[tuple[int, str]],
-    ):
-        self.matched = matched
-        self.unmatched = unmatched  # List of (line_number, value) tuples
+    Frozen dataclass for consistency with the rest of the project's data
+    containers (CIDInfo, QueryResult, QuerySummary, etc.).
+    
+    Attributes:
+        matched: CIDInfo entries that were found in the registry.
+        unmatched: Tuples of (line_number, value) for entries not in the registry.
+    """
+    
+    matched: tuple[CIDInfo, ...]
+    unmatched: tuple[tuple[int, str], ...]
 
 
 def load_cid_registry(path: Path) -> dict[str, str]:
@@ -95,7 +102,7 @@ def load_cid_filter(
                 f"CID filter line {line_num}: '{value}' not found in registry"
             )
     
-    return result.matched
+    return list(result.matched)
 
 
 def load_cid_filter_with_details(
@@ -138,7 +145,10 @@ def load_cid_filter_with_details(
             else:
                 unmatched.append((line_num, line))
     
-    return CIDFilterResult(matched=matched, unmatched=unmatched)
+    return CIDFilterResult(
+        matched=tuple(matched),
+        unmatched=tuple(unmatched),
+    )
 
 
 def load_query(path: Path) -> str:
@@ -167,19 +177,6 @@ def get_all_cids(registry: dict[str, str]) -> list[CIDInfo]:
     return [CIDInfo(cid=cid, name=name) for cid, name in registry.items()]
 
 
-def _get_result_error(result: QueryResult) -> str | None:
-    """
-    Safely extract error from QueryResult.
-    
-    Args:
-        result: Query result to check.
-    
-    Returns:
-        Error message if present, None otherwise.
-    """
-    return getattr(result, 'error', None) or None
-
-
 @asynccontextmanager
 async def _create_client(
     credentials: Credentials,
@@ -187,6 +184,10 @@ async def _create_client(
 ) -> AsyncIterator[CrowdStrikeClient]:
     """
     Create CrowdStrike client with proper resource management.
+    
+    Uses the client's own async context manager (__aenter__/__aexit__)
+    for session lifecycle. No defensive hasattr/getattr needed because
+    CrowdStrikeClient is defined in this project with a known interface.
     
     Args:
         credentials: CrowdStrike API credentials.
@@ -202,14 +203,84 @@ async def _create_client(
     try:
         yield client
     finally:
-        # Clean up client resources if it has a close method
-        if hasattr(client, 'close'):
-            close_method = getattr(client, 'close')
-            if callable(close_method):
-                result = close_method()
-                # Handle async close methods
-                if asyncio.iscoroutine(result):
-                    await result
+        await client.close()
+
+
+def _build_summaries(
+    results: list[QueryResult],
+    total_time: float,
+) -> tuple[list[QuerySummary], int, int, int]:
+    """
+    Build per-CID summaries from query results.
+    
+    Args:
+        results: List of QueryResult from execution.
+        total_time: Wall-clock time for the entire run.
+    
+    Returns:
+        Tuple of (cid_summaries, total_records, successful_count, failed_count).
+    """
+    cid_summaries: list[QuerySummary] = []
+    total_records = 0
+    successful = 0
+    failed = 0
+    
+    for result in results:
+        has_error = result.has_error
+        status = QueryJobStatus.FAILED if has_error else QueryJobStatus.COMPLETED
+        
+        if has_error:
+            failed += 1
+        else:
+            successful += 1
+        
+        total_records += result.record_count
+        
+        summary = QuerySummary(
+            cid=result.cid,
+            cid_name=result.cid_name,
+            record_count=result.record_count,
+            execution_time_seconds=result.execution_time_seconds,
+            status=status,
+            error=result.error,
+        )
+        cid_summaries.append(summary)
+    
+    return cid_summaries, total_records, successful, failed
+
+
+def _write_outputs(
+    mode: ExecutionMode,
+    results: list[QueryResult],
+    output_dir: Path,
+    verbose: bool,
+) -> None:
+    """
+    Write query results to CSV files.
+    
+    Args:
+        mode: Execution mode (batch writes one file, iterative writes per-CID).
+        results: List of QueryResult from execution.
+        output_dir: Directory for output files.
+        verbose: Whether to log output paths.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    if mode == ExecutionMode.BATCH:
+        output_filename = generate_output_filename("batch_results", "csv")
+        output_path = output_dir / output_filename
+        # Batch mode produces exactly one result; if run_batch ever returns
+        # multiple results this assertion will catch the change early.
+        assert len(results) == 1, f"Batch mode expected 1 result, got {len(results)}"
+        write_csv(results[0], output_path, include_cid=True)
+        if verbose:
+            logger.info(f"Results written to: {output_path}")
+    else:
+        output_files = write_csv_per_cid(results, output_dir)
+        if verbose:
+            logger.info(
+                f"Results written to {len(output_files)} files in: {output_dir}"
+            )
 
 
 async def run(
@@ -222,7 +293,15 @@ async def run(
     verbose: bool = False,
 ) -> OverallSummary:
     """
-    Run the NG-SIEM query workflow.
+    Run the Arbitrary Queries workflow.
+    
+    High-level orchestrator that coordinates:
+    1. Configuration and CID registry loading
+    2. CID filtering (if a filter file is provided)
+    3. Query loading and credential retrieval
+    4. Query execution via the appropriate mode
+    5. CSV output generation
+    6. Summary building and reporting
     
     Args:
         config_path: Path to configuration file.
@@ -277,16 +356,14 @@ async def run(
         client_secret_ref=config.onepassword.client_secret_ref,
     )
     
-    # Initialize client with proper resource management
+    # Execute queries
     async with _create_client(credentials, config.crowdstrike) as client:
-        # Initialize executor
         executor = QueryExecutor(
             client=client,
             query_defaults=config.query_defaults,
             concurrency_config=config.concurrency,
         )
         
-        # Execute query
         results: list[QueryResult]
         if mode == ExecutionMode.BATCH:
             result = await executor.run_batch(
@@ -297,68 +374,26 @@ async def run(
             )
             results = [result]
         else:
-            # run_iterative may return ErrorQueryResult for failed queries
-            results = await executor.run_iterative(  # type: ignore[assignment]
+            results = await executor.run_iterative(
                 cid_infos=cid_infos,
                 query=query,
                 start_time=start_time,
                 end_time=end_time,
             )
     
-    # Generate output
-    config.output_dir.mkdir(parents=True, exist_ok=True)
-    
-    if mode == ExecutionMode.BATCH:
-        output_filename = generate_output_filename("batch_results", "csv")
-        output_path = config.output_dir / output_filename
-        write_csv(results[0], output_path, include_cid=True)
-        if verbose:
-            logger.info(f"Results written to: {output_path}")
-    else:
-        output_files = write_csv_per_cid(results, config.output_dir)
-        if verbose:
-            logger.info(
-                f"Results written to {len(output_files)} files in: {config.output_dir}"
-            )
+    # Write output files
+    _write_outputs(mode, results, config.output_dir, verbose)
     
     # Build summaries
     end_timestamp = datetime.now(timezone.utc)
     total_time = (end_timestamp - start_timestamp).total_seconds()
     
-    cid_summaries: list[QuerySummary] = []
-    total_records = 0
-    successful = 0
-    failed = 0
+    cid_summaries, total_records, successful, failed = _build_summaries(
+        results, total_time
+    )
     
-    for result in results:
-        error = _get_result_error(result)
-        has_error = error is not None
-        status = QueryJobStatus.FAILED if has_error else QueryJobStatus.COMPLETED
-        
-        if has_error:
-            failed += 1
-        else:
-            successful += 1
-        
-        total_records += result.record_count
-        
-        # Get execution time if available, otherwise 0.0
-        # Note: Accurate per-query timing requires job-level tracking
-        exec_time = getattr(result, 'execution_time_seconds', 0.0)
-        if not isinstance(exec_time, (int, float)):
-            exec_time = 0.0
-        
-        summary = QuerySummary(
-            cid=result.cid,
-            cid_name=result.cid_name,
-            record_count=result.record_count,
-            execution_time_seconds=float(exec_time),
-            status=status,
-            error=error,
-        )
-        cid_summaries.append(summary)
-        
-        if verbose:
+    if verbose:
+        for summary in cid_summaries:
             logger.info(format_summary(summary))
     
     # total_cids reflects actual CIDs queried, regardless of mode
