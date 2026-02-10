@@ -1,5 +1,5 @@
 """
-Async query execution and polling for NG-SIEM Hunter.
+Async query execution and polling for Arbitrary Queries.
 
 Handles concurrent query execution with configurable limits,
 polling with timeout handling, and retry logic for transient failures.
@@ -30,21 +30,6 @@ class QueryTimeoutError(Exception):
     """Raised when a query exceeds the configured timeout."""
 
     pass
-
-
-@dataclass(frozen=True)
-class ErrorQueryResult:
-    """
-    QueryResult with error information for failed queries.
-
-    Since QueryResult is frozen, we use this separate class to include error details.
-    """
-
-    cid: str
-    cid_name: str
-    events: list[dict[str, Any]]
-    record_count: int
-    error: str | None = None
 
 
 @dataclass
@@ -88,6 +73,7 @@ class QueryExecutor:
         Returns:
             QueryResult with consolidated events from all CIDs.
         """
+        query_start = datetime.now(timezone.utc)
         start = start_time or self.query_defaults.time_range
         cids = [info.cid for info in cid_infos]
 
@@ -106,12 +92,14 @@ class QueryExecutor:
         )
 
         events = result.get("events", [])
+        elapsed = (datetime.now(timezone.utc) - query_start).total_seconds()
 
         return QueryResult(
             cid="batch",
             cid_name=f"Batch ({len(cid_infos)} CIDs)",
             events=events,
             record_count=len(events),
+            execution_time_seconds=elapsed,
         )
 
     async def run_iterative(
@@ -120,12 +108,13 @@ class QueryExecutor:
         query: str,
         start_time: str | None = None,
         end_time: str = "now",
-    ) -> list[QueryResult | ErrorQueryResult]:
+    ) -> list[QueryResult]:
         """
         Execute separate queries per CID (iterative mode).
 
         Submits individual queries for each CID with controlled concurrency.
-        Returns a list of QueryResults, one per CID.
+        Returns a list of QueryResults, one per CID. Failed queries are
+        represented as QueryResult instances with the ``error`` field set.
 
         Args:
             cid_infos: List of CIDs to query.
@@ -134,11 +123,11 @@ class QueryExecutor:
             end_time: End time (default "now").
 
         Returns:
-            List of QueryResults (or ErrorQueryResult for failures), one per CID.
+            List of QueryResults, one per CID (check ``has_error`` for failures).
         """
         semaphore = asyncio.Semaphore(self.concurrency_config.max_concurrent_queries)
 
-        async def run_with_semaphore(cid_info: CIDInfo) -> QueryResult | ErrorQueryResult:
+        async def run_with_semaphore(cid_info: CIDInfo) -> QueryResult:
             async with semaphore:
                 return await execute_query(
                     executor=self,
@@ -160,7 +149,7 @@ async def execute_query(
     query: str,
     start_time: str | None = None,
     end_time: str = "now",
-) -> QueryResult | ErrorQueryResult:
+) -> QueryResult:
     """
     Execute a single query for one CID with retry logic.
 
@@ -172,8 +161,9 @@ async def execute_query(
         end_time: End time.
 
     Returns:
-        QueryResult with events or ErrorQueryResult with error information.
+        QueryResult with events on success, or with error field set on failure.
     """
+    query_start = datetime.now(timezone.utc)
     start = start_time or executor.query_defaults.time_range
     last_error: Exception | None = None
     retry_attempts = executor.concurrency_config.retry_attempts
@@ -196,12 +186,14 @@ async def execute_query(
             )
 
             events = result.get("events", [])
+            elapsed = (datetime.now(timezone.utc) - query_start).total_seconds()
 
             return QueryResult(
                 cid=cid_info.cid,
                 cid_name=cid_info.name,
                 events=events,
                 record_count=len(events),
+                execution_time_seconds=elapsed,
             )
 
         except (QuerySubmissionError, QueryStatusError, QueryTimeoutError) as e:
@@ -214,10 +206,11 @@ async def execute_query(
                 await asyncio.sleep(retry_delay)
 
     # All retries exhausted, return error result
+    elapsed = (datetime.now(timezone.utc) - query_start).total_seconds()
     logger.error(
         f"Query failed for CID {cid_info.cid} after {retry_attempts + 1} attempts: {last_error}"
     )
-    return _create_error_result(cid_info, last_error)
+    return _create_error_result(cid_info, last_error, elapsed)
 
 
 async def poll_until_complete(
@@ -266,22 +259,30 @@ async def poll_until_complete(
 
 
 def _create_error_result(
-    cid_info: CIDInfo, error: Exception | None
-) -> ErrorQueryResult:
+    cid_info: CIDInfo,
+    error: Exception | None,
+    execution_time_seconds: float = 0.0,
+) -> QueryResult:
     """
-    Create an ErrorQueryResult representing a failed query.
+    Create a QueryResult representing a failed query.
+
+    Uses the unified QueryResult with the error field set, rather than a
+    separate error class. This keeps the type system clean and avoids
+    duck-typing with getattr() in downstream code.
 
     Args:
         cid_info: The CID information for the failed query.
         error: The exception that caused the failure.
+        execution_time_seconds: Wall-clock time spent on this query.
 
     Returns:
-        ErrorQueryResult with error details.
+        QueryResult with error details and an empty event tuple.
     """
-    return ErrorQueryResult(
+    return QueryResult(
         cid=cid_info.cid,
         cid_name=cid_info.name,
-        events=[],
+        events=(),
         record_count=0,
         error=str(error) if error else "Unknown error",
+        execution_time_seconds=execution_time_seconds,
     )
