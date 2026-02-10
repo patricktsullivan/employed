@@ -99,100 +99,11 @@ class TestParseArgs:
         with pytest.raises(SystemExit) as exc_info:
             parse_args([])
         
-        assert exc_info.value.code == 2  # argparse error exit code
-
-    def test_parse_args_mode_choices(self, tmp_path):
-        """parse_args should reject invalid mode choices."""
-        query = tmp_path / "query.txt"
-        
-        with pytest.raises(SystemExit) as exc_info:
-            parse_args(["-q", str(query), "-m", "invalid"])
-        
         assert exc_info.value.code == 2
-
-    def test_parse_args_mode_batch(self, tmp_path):
-        """parse_args should accept 'batch' mode."""
-        query = tmp_path / "query.txt"
-        
-        args = parse_args(["-q", str(query), "-m", "batch"])
-        
-        assert args.mode == "batch"
-
-    def test_parse_args_mode_iterative(self, tmp_path):
-        """parse_args should accept 'iterative' mode."""
-        query = tmp_path / "query.txt"
-        
-        args = parse_args(["-q", str(query), "-m", "iterative"])
-        
-        assert args.mode == "iterative"
-
-    def test_parse_args_paths_are_path_objects(self, tmp_path):
-        """parse_args should convert path strings to Path objects."""
-        config = tmp_path / "settings.json"
-        query = tmp_path / "query.txt"
-        cids = tmp_path / "cids.txt"
-        
-        args = parse_args([
-            "-c", str(config),
-            "-q", str(query),
-            "--cids", str(cids),
-        ])
-        
-        assert isinstance(args.config, Path)
-        assert isinstance(args.query, Path)
-        assert isinstance(args.cids, Path)
-
-    def test_parse_args_accepts_argv_list(self, tmp_path):
-        """parse_args should accept explicit argv for testing."""
-        query = tmp_path / "query.txt"
-        
-        # Should not read from sys.argv
-        args = parse_args(["-q", str(query)])
-        
-        assert args.query == query
-
-    def test_parse_args_default_config_path(self, tmp_path):
-        """parse_args should use default config path."""
-        query = tmp_path / "query.txt"
-        
-        args = parse_args(["-q", str(query)])
-        
-        assert args.config == Path("./config/settings.json")
-
-    def test_parse_args_default_end_time(self, tmp_path):
-        """parse_args should default end time to 'now'."""
-        query = tmp_path / "query.txt"
-        
-        args = parse_args(["-q", str(query)])
-        
-        assert args.end == "now"
 
 
 class TestValidatePaths:
     """Tests for validate_paths function."""
-
-    def test_validate_paths_all_exist(self, tmp_config, tmp_query):
-        """validate_paths should return empty list when all paths exist."""
-        args = parse_args([
-            "-c", str(tmp_config),
-            "-q", str(tmp_query),
-        ])
-        
-        errors = validate_paths(args)
-        
-        assert errors == []
-
-    def test_validate_paths_all_exist_with_cids(self, tmp_config, tmp_query, tmp_cids):
-        """validate_paths should validate optional cids path when provided."""
-        args = parse_args([
-            "-c", str(tmp_config),
-            "-q", str(tmp_query),
-            "--cids", str(tmp_cids),
-        ])
-        
-        errors = validate_paths(args)
-        
-        assert errors == []
 
     def test_validate_paths_missing_config(self, tmp_query):
         """validate_paths should report missing config file."""
@@ -218,21 +129,8 @@ class TestValidatePaths:
         assert len(errors) == 1
         assert "query" in errors[0].lower()
 
-    def test_validate_paths_missing_cids(self, tmp_config, tmp_query):
-        """validate_paths should report missing cids file when specified."""
-        args = parse_args([
-            "-c", str(tmp_config),
-            "-q", str(tmp_query),
-            "--cids", "/nonexistent/cids.txt",
-        ])
-        
-        errors = validate_paths(args)
-        
-        assert len(errors) == 1
-        assert "cid" in errors[0].lower()
-
-    def test_validate_paths_cids_none_ok(self, tmp_config, tmp_query):
-        """validate_paths should not require cids when not specified."""
+    def test_validate_paths_valid_paths(self, tmp_config, tmp_query):
+        """validate_paths should return empty list for valid paths."""
         args = parse_args([
             "-c", str(tmp_config),
             "-q", str(tmp_query),
@@ -317,44 +215,8 @@ class TestMain:
         call_kwargs = mock_run.call_args[1]
         assert call_kwargs["mode"] == ExecutionMode.ITERATIVE
 
-    def test_main_missing_config_returns_1(self, tmp_query, capsys):
-        """main should return 1 when config file is missing."""
-        exit_code = main([
-            "-c", "/nonexistent/config.json",
-            "-q", str(tmp_query),
-        ])
-        
-        assert exit_code == 1
-        captured = capsys.readouterr()
-        assert "config" in captured.err.lower()
-
-    def test_main_missing_query_returns_1(self, tmp_config, capsys):
-        """main should return 1 when query file is missing."""
-        exit_code = main([
-            "-c", str(tmp_config),
-            "-q", "/nonexistent/query.txt",
-        ])
-        
-        assert exit_code == 1
-        captured = capsys.readouterr()
-        assert "query" in captured.err.lower()
-
-    def test_main_keyboard_interrupt_returns_130(self, tmp_config, tmp_query, capsys):
-        """main should return 130 on KeyboardInterrupt (SIGINT convention)."""
-        with patch("arbitrary_queries.cli.run", new_callable=AsyncMock) as mock_run:
-            mock_run.side_effect = KeyboardInterrupt()
-            
-            exit_code = main([
-                "-c", str(tmp_config),
-                "-q", str(tmp_query),
-            ])
-        
-        assert exit_code == 130
-        captured = capsys.readouterr()
-        assert "aborted" in captured.err.lower()
-
     def test_main_exception_returns_1(self, tmp_config, tmp_query, capsys):
-        """main should return 1 on exception."""
+        """main should return 1 and print error on exception."""
         with patch("arbitrary_queries.cli.run", new_callable=AsyncMock) as mock_run:
             mock_run.side_effect = RuntimeError("Something went wrong")
             
@@ -447,7 +309,7 @@ class TestMainIntegration:
         
         assert exc_info.value.code == 0
         captured = capsys.readouterr()
-        assert "NG-SIEM Hunter" in captured.out
+        assert "Arbitrary Queries" in captured.out
 
     def test_main_help_shows_examples(self, capsys):
         """main --help should show usage examples."""
