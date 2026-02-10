@@ -1,5 +1,5 @@
 """
-Output generation for NG-SIEM Hunter.
+Output generation for Arbitrary Queries.
 
 Handles CSV file creation and summary report formatting.
 """
@@ -212,15 +212,11 @@ def generate_output_filename(
     Returns:
         Safe filename string.
     """
-    # Include microseconds to avoid collisions when generating multiple files quickly
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
-    # Sanitize CID for filesystem safety (ASCII alphanumeric, underscore, hyphen only)
     if cid:
-        safe_cid = re.sub(r"[^a-zA-Z0-9_-]", "_", cid)
-        # Collapse multiple underscores and strip leading/trailing
-        safe_cid = re.sub(r"_+", "_", safe_cid).strip("_")
-        if safe_cid:
-            return f"{prefix}_{safe_cid}_{timestamp}.{extension}"
-
-    return f"{prefix}_{timestamp}.{extension}"
+        # Sanitize CID for filesystem safety
+        safe_cid = re.sub(r'[^\w\-]', '_', cid)
+        return f"{prefix}_{safe_cid}_{timestamp}.{extension}"
+    else:
+        return f"{prefix}_{timestamp}.{extension}"
