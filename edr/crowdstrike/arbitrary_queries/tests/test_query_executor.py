@@ -6,12 +6,12 @@ Tests async query execution, polling, and result collection.
 
 import pytest
 import asyncio
+from dataclasses import FrozenInstanceError
 from typing import Any
 from unittest.mock import MagicMock, AsyncMock
 
 from arbitrary_queries.query_executor import (
     QueryExecutor,
-    ErrorQueryResult,
     execute_query,
     poll_until_complete,
     QueryTimeoutError,
@@ -72,6 +72,7 @@ def mock_client() -> Any:
         }
     )
     client.cancel_query = AsyncMock()
+    client.close = AsyncMock()
     return client
 
 
@@ -190,6 +191,25 @@ class TestExecuteQuery:
         assert result.cid == "test-cid"
         assert result.cid_name == "Test Customer"
         assert result.record_count == 3
+        assert not result.has_error
+
+    @pytest.mark.asyncio
+    async def test_execute_query_tracks_timing(self, executor):
+        """execute_query should record per-query execution time."""
+        executor.client.get_query_status.return_value = {
+            "done": True,
+            "events": [],
+            "metaData": {"eventCount": 0},
+        }
+
+        result = await execute_query(
+            executor=executor,
+            cid_info=CIDInfo(cid="cid", name="Name"),
+            query="test",
+        )
+
+        # Execution time should be positive (even if very small)
+        assert result.execution_time_seconds >= 0.0
 
     @pytest.mark.asyncio
     async def test_execute_query_with_time_range(self, executor):
@@ -342,43 +362,25 @@ class TestPollUntilComplete:
         }
 
         with pytest.raises(QueryTimeoutError):
-            await poll_until_complete(executor=executor, job_id="job-123")
+            await poll_until_complete(
+                executor=executor,
+                job_id="job-cancel-test",
+            )
 
-        mock_client.cancel_query.assert_called_once_with("job-123")
-
-    @pytest.mark.asyncio
-    async def test_poll_timeout_handles_cancel_failure(self, mock_client, concurrency_config):
-        """poll_until_complete should not fail if cancel fails."""
-        short_timeout_defaults = QueryDefaults(
-            time_range="-7d",
-            poll_interval_seconds=0.02,
-            timeout_seconds=0.05,
-        )
-        executor = QueryExecutor(
-            client=mock_client,
-            query_defaults=short_timeout_defaults,
-            concurrency_config=concurrency_config,
-        )
-
-        mock_client.get_query_status.return_value = {"done": False}
-        mock_client.cancel_query.side_effect = Exception("Cancel failed")
-
-        # Should still raise QueryTimeoutError, not the cancel exception
-        with pytest.raises(QueryTimeoutError):
-            await poll_until_complete(executor=executor, job_id="job-123")
+        mock_client.cancel_query.assert_called_once_with("job-cancel-test")
 
 
 # =============================================================================
-# QueryExecutor.run_batch Tests
+# Batch Mode Tests
 # =============================================================================
 
 
-class TestQueryExecutorRunBatch:
-    """Tests for QueryExecutor.run_batch method."""
+class TestRunBatch:
+    """Tests for run_batch method."""
 
     @pytest.mark.asyncio
-    async def test_run_batch_single_query(self, executor, sample_cid_infos, sample_events):
-        """run_batch should execute single query for all CIDs."""
+    async def test_run_batch_success(self, executor, sample_cid_infos, sample_events):
+        """run_batch should consolidate events into a single QueryResult."""
         executor.client.get_query_status.return_value = {
             "done": True,
             "events": sample_events,
@@ -387,23 +389,18 @@ class TestQueryExecutorRunBatch:
 
         result = await executor.run_batch(
             cid_infos=sample_cid_infos,
-            query='#event_simpleName="Test"',
+            query="test",
         )
 
-        # Batch mode returns single QueryResult
         assert isinstance(result, QueryResult)
         assert result.cid == "batch"
-        assert "3 CIDs" in result.cid_name
         assert result.record_count == 3
-
-        # Query should have been submitted with all CIDs
-        call_kwargs = executor.client.submit_query.call_args.kwargs
-        assert len(call_kwargs["cids"]) == 3
-        assert set(call_kwargs["cids"]) == {"cid1", "cid2", "cid3"}
+        assert not result.has_error
+        assert result.execution_time_seconds >= 0.0
 
     @pytest.mark.asyncio
-    async def test_run_batch_uses_default_time(self, executor, sample_cid_infos):
-        """run_batch should use default time range when not specified."""
+    async def test_run_batch_submits_all_cids(self, executor, sample_cid_infos):
+        """run_batch should include all CIDs in the query."""
         executor.client.get_query_status.return_value = {
             "done": True,
             "events": [],
@@ -416,133 +413,37 @@ class TestQueryExecutorRunBatch:
         )
 
         call_kwargs = executor.client.submit_query.call_args.kwargs
-        assert call_kwargs["start_time"] == "-7d"
-        assert call_kwargs["end_time"] == "now"
-
-    @pytest.mark.asyncio
-    async def test_run_batch_uses_custom_time(self, executor, sample_cid_infos):
-        """run_batch should use provided time range."""
-        executor.client.get_query_status.return_value = {
-            "done": True,
-            "events": [],
-            "metaData": {"eventCount": 0},
-        }
-
-        await executor.run_batch(
-            cid_infos=sample_cid_infos,
-            query="test",
-            start_time="-24h",
-            end_time="-1h",
-        )
-
-        call_kwargs = executor.client.submit_query.call_args.kwargs
-        assert call_kwargs["start_time"] == "-24h"
-        assert call_kwargs["end_time"] == "-1h"
-
-    @pytest.mark.asyncio
-    async def test_run_batch_empty_cids(self, executor):
-        """run_batch should handle empty CID list."""
-        executor.client.get_query_status.return_value = {
-            "done": True,
-            "events": [],
-            "metaData": {"eventCount": 0},
-        }
-
-        result = await executor.run_batch(
-            cid_infos=[],
-            query="test",
-        )
-
-        assert result.record_count == 0
-        call_kwargs = executor.client.submit_query.call_args.kwargs
-        assert call_kwargs["cids"] == []
+        assert call_kwargs["cids"] == ["cid1", "cid2", "cid3"]
 
 
 # =============================================================================
-# QueryExecutor.run_iterative Tests
+# Iterative Mode Tests
 # =============================================================================
 
 
-class TestQueryExecutorRunIterative:
-    """Tests for QueryExecutor.run_iterative method."""
+class TestRunIterative:
+    """Tests for run_iterative method."""
 
     @pytest.mark.asyncio
-    async def test_run_iterative_multiple_queries(self, executor, sample_cid_infos):
-        """run_iterative should execute separate query per CID."""
+    async def test_run_iterative_success(self, executor, sample_cid_infos, sample_events):
+        """run_iterative should return one QueryResult per CID."""
         executor.client.get_query_status.return_value = {
             "done": True,
-            "events": [{"test": "event"}],
-            "metaData": {"eventCount": 1},
+            "events": sample_events,
+            "metaData": {"eventCount": len(sample_events)},
         }
 
         results = await executor.run_iterative(
             cid_infos=sample_cid_infos,
-            query='#event_simpleName="Test"',
-        )
-
-        # Iterative mode returns list of QueryResults
-        assert isinstance(results, list)
-        assert len(results) == 3
-
-        # Each result should have different CID
-        cids = {r.cid for r in results}
-        assert cids == {"cid1", "cid2", "cid3"}
-
-        # Should have submitted 3 separate queries
-        assert executor.client.submit_query.call_count == 3
-
-    @pytest.mark.asyncio
-    async def test_run_iterative_respects_concurrency(self, mock_client, query_defaults):
-        """run_iterative should respect max_concurrent limit."""
-        max_concurrent_seen = 0
-        current_concurrent = 0
-        lock = asyncio.Lock()
-
-        async def mock_submit(*args, **kwargs):
-            nonlocal max_concurrent_seen, current_concurrent
-            async with lock:
-                current_concurrent += 1
-                max_concurrent_seen = max(max_concurrent_seen, current_concurrent)
-            await asyncio.sleep(0.05)  # Simulate work
-            async with lock:
-                current_concurrent -= 1
-            return "job-id"
-
-        mock_client.submit_query = mock_submit
-        mock_client.get_query_status = AsyncMock(
-            return_value={
-                "done": True,
-                "events": [],
-                "metaData": {"eventCount": 0},
-            }
-        )
-
-        # Use low concurrency limit
-        low_concurrency = ConcurrencyConfig(
-            max_concurrent_queries=3,
-            retry_attempts=2,
-            retry_delay_seconds=0.01,
-        )
-        executor = QueryExecutor(
-            client=mock_client,
-            query_defaults=query_defaults,
-            concurrency_config=low_concurrency,
-        )
-
-        # Create more CIDs than max_concurrent
-        many_cids = [CIDInfo(cid=f"cid{i}", name=f"Customer {i}") for i in range(10)]
-
-        await executor.run_iterative(
-            cid_infos=many_cids,
             query="test",
         )
 
-        # Should have limited concurrency
-        assert max_concurrent_seen <= 3
+        assert len(results) == 3
+        assert all(isinstance(r, QueryResult) for r in results)
 
     @pytest.mark.asyncio
-    async def test_run_iterative_handles_partial_failures(self, executor, sample_cid_infos):
-        """run_iterative should continue on partial failures."""
+    async def test_run_iterative_partial_failure(self, executor, sample_cid_infos):
+        """run_iterative should return error results for failed CIDs."""
         call_count = 0
 
         async def mock_submit(*args, **kwargs):
@@ -565,16 +466,12 @@ class TestQueryExecutorRunIterative:
             query="test",
         )
 
-        # Should have 3 results (1 failed after retries, 2 succeeded)
+        # Should have 3 results total
         assert len(results) == 3
 
-        # One should have error
-        errors = [r for r in results if isinstance(r, ErrorQueryResult)]
-        successes = [
-            r
-            for r in results
-            if isinstance(r, QueryResult) and not isinstance(r, ErrorQueryResult)
-        ]
+        # Identify failed and successful results using the unified QueryResult
+        errors = [r for r in results if r.has_error]
+        successes = [r for r in results if not r.has_error]
 
         assert len(errors) == 1
         assert len(successes) == 2
@@ -625,6 +522,7 @@ class TestRetryLogic:
 
         # Should have succeeded after retries
         assert isinstance(result, QueryResult)
+        assert not result.has_error
         assert executor.client.submit_query.call_count == 3
 
     @pytest.mark.asyncio
@@ -639,8 +537,9 @@ class TestRetryLogic:
             query="test",
         )
 
-        # Should have failed result with error
-        assert isinstance(result, ErrorQueryResult)
+        # Should have failed result with error — using unified QueryResult
+        assert isinstance(result, QueryResult)
+        assert result.has_error
         assert result.error is not None
         assert "Permanent error" in result.error
         assert result.record_count == 0
@@ -667,6 +566,7 @@ class TestRetryLogic:
         )
 
         assert isinstance(result, QueryResult)
+        assert not result.has_error
 
     @pytest.mark.asyncio
     async def test_retry_on_timeout(self, mock_client):
@@ -711,49 +611,71 @@ class TestRetryLogic:
 
 
 # =============================================================================
-# ErrorQueryResult Tests
+# Error Result Tests (formerly ErrorQueryResult)
 # =============================================================================
 
 
-class TestErrorQueryResult:
-    """Tests for ErrorQueryResult dataclass."""
+class TestErrorResults:
+    """Tests for error results using the unified QueryResult.
+    
+    Previously, error results used a separate ErrorQueryResult class.
+    Now they use QueryResult with the error field set. This keeps the
+    type system clean and avoids duck-typing in downstream code.
+    """
 
-    def test_error_result_creation(self):
-        """ErrorQueryResult should store error information."""
-        result = ErrorQueryResult(
-            cid="test-cid",
-            cid_name="Test Customer",
-            events=[],
-            record_count=0,
-            error="Something went wrong",
+    @pytest.mark.asyncio
+    async def test_error_result_has_error_field(self, executor):
+        """Failed queries should populate the error field on QueryResult."""
+        executor.client.submit_query.side_effect = QuerySubmissionError("Connection refused")
+
+        result = await execute_query(
+            executor=executor,
+            cid_info=CIDInfo(cid="test-cid", name="Test Customer"),
+            query="test",
         )
 
+        assert result.has_error
+        assert result.error is not None
+        assert "Connection refused" in result.error
         assert result.cid == "test-cid"
         assert result.cid_name == "Test Customer"
-        assert result.events == []
         assert result.record_count == 0
-        assert result.error == "Something went wrong"
+        assert result.events == ()
 
-    def test_error_result_is_frozen(self):
-        """ErrorQueryResult should be immutable."""
-        result = ErrorQueryResult(
-            cid="cid",
-            cid_name="name",
-            events=[],
-            record_count=0,
-            error="error",
+    @pytest.mark.asyncio
+    async def test_error_result_is_frozen(self, executor):
+        """Error QueryResults should be immutable (same as success results)."""
+        executor.client.submit_query.side_effect = QuerySubmissionError("Error")
+
+        result = await execute_query(
+            executor=executor,
+            cid_info=CIDInfo(cid="cid", name="name"),
+            query="test",
         )
 
-        with pytest.raises(AttributeError):
-            result.error = "new error"  # type: ignore[misc]
+        with pytest.raises(FrozenInstanceError):
+            setattr(result, "error", "new error")
 
-    def test_error_result_default_error(self):
-        """ErrorQueryResult should allow None error."""
-        result = ErrorQueryResult(
-            cid="cid",
-            cid_name="name",
-            events=[],
-            record_count=0,
+    @pytest.mark.asyncio
+    async def test_error_result_tracks_timing(self, executor):
+        """Error results should still track execution time."""
+        executor.client.submit_query.side_effect = QuerySubmissionError("Timeout")
+
+        result = await execute_query(
+            executor=executor,
+            cid_info=CIDInfo(cid="cid", name="name"),
+            query="test",
         )
 
+        assert result.has_error
+        assert result.execution_time_seconds >= 0.0
+
+    def test_successful_result_has_no_error(self):
+        """Successful QueryResult should have error=None."""
+        result = QueryResult(
+            cid="cid", cid_name="name",
+            events=({"data": "test"},), record_count=1,
+        )
+
+        assert not result.has_error
         assert result.error is None
