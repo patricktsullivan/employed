@@ -1,5 +1,5 @@
 """
-Data models for NG-SIEM Hunter.
+Data models for Arbitrary Queries.
 
 Contains data classes for query results, job tracking, and execution summaries.
 
@@ -110,11 +110,19 @@ class QueryResult:
     """
     Results from a completed query for a single CID.
     
+    This is the unified result type for both successful and failed queries.
+    Successful queries carry events; failed queries carry an error message
+    with an empty event tuple. This avoids duck-typing and keeps the type
+    system honest — callers can check ``has_error`` instead of relying on
+    ``getattr`` or ``isinstance`` checks against a separate error class.
+    
     Attributes:
         cid: The CID that was queried.
         cid_name: Human-readable customer name.
-        events: List of event dictionaries returned by the query.
+        events: Event dictionaries returned by the query (tuple for immutability).
         record_count: Total number of records returned.
+        error: Error message if the query failed, None on success.
+        execution_time_seconds: Per-query wall-clock time in seconds.
     
     Raises:
         ValueError: If record_count doesn't match len(events).
@@ -124,6 +132,8 @@ class QueryResult:
     cid_name: str
     events: tuple[dict[str, Any], ...]  # Tuple for true immutability
     record_count: int
+    error: str | None = None
+    execution_time_seconds: float = 0.0
     
     def __post_init__(self) -> None:
         """Validate that record_count matches events length."""
@@ -132,6 +142,11 @@ class QueryResult:
                 f"record_count ({self.record_count}) must match "
                 f"len(events) ({len(self.events)})"
             )
+    
+    @property
+    def has_error(self) -> bool:
+        """Return True if the query failed with an error."""
+        return self.error is not None
     
     @property
     def is_empty(self) -> bool:
@@ -267,6 +282,8 @@ def create_query_result(
     cid: str,
     cid_name: str,
     events: list[dict[str, Any]],
+    error: str | None = None,
+    execution_time_seconds: float = 0.0,
 ) -> QueryResult:
     """
     Create a QueryResult from a list of events.
@@ -278,6 +295,8 @@ def create_query_result(
         cid: The CID that was queried.
         cid_name: Human-readable customer name.
         events: List of event dictionaries.
+        error: Error message if query failed.
+        execution_time_seconds: Per-query wall-clock time.
     
     Returns:
         QueryResult with events as a tuple.
@@ -288,6 +307,8 @@ def create_query_result(
         cid_name=cid_name,
         events=events_tuple,
         record_count=len(events_tuple),
+        error=error,
+        execution_time_seconds=execution_time_seconds,
     )
 
 
