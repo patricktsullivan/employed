@@ -143,18 +143,25 @@ class CrowdStrikeClient:
         self, response: dict[str, Any] | Any, operation: str
     ) -> dict[str, Any]:
         """
-        Validate a FalconPy response and extract the body.
+        Validate a FalconPy response and return the full response dict.
 
-        FalconPy returns dicts with ``status_code``, ``headers``, and ``body``.
-        This method checks the status and returns the body on success, or
-        raises an appropriate exception on failure.
+        FalconPy NGSIEM responses have ``status_code`` and ``headers`` at
+        the top level, alongside the payload which varies by endpoint:
+
+        - ``start_search`` → ``resources: {"id": "...", ...}``
+        - ``get_search_status`` → ``body: {"done": ..., "events": [...]}``
+        - Error responses → ``errors: [{"message": "..."}]``
+
+        This method checks the HTTP status and raises on failure. On
+        success it returns the full response dict so each caller can
+        extract the payload key it needs.
 
         Args:
             response: FalconPy response (dict or Result object).
             operation: Human-readable operation name for error messages.
 
         Returns:
-            The response body dictionary.
+            The full response dictionary (status_code, headers, payload).
 
         Raises:
             AuthenticationError: On HTTP 401 or 403.
@@ -162,24 +169,30 @@ class CrowdStrikeClient:
         """
         resp = self._as_dict(response)
         status = resp.get("status_code", 0)
-        body = resp.get("body", {})
 
+        # Log payload keys (everything except transport metadata)
+        payload_keys = [k for k in resp if k not in ("status_code", "headers")]
         logger.debug(
-            "%s response: HTTP %s, body keys=%s",
+            "%s response: HTTP %s, payload keys=%s",
             operation,
             status,
-            list(body.keys()) if isinstance(body, dict) else type(body).__name__,
+            payload_keys,
         )
 
         if status in (200, 201):
-            return body
+            return resp
 
-        # Extract error message from standard CrowdStrike error envelope
-        errors = body.get("errors", []) if isinstance(body, dict) else []
-        if errors:
+        # Extract error message — errors may be top-level or inside body
+        errors = resp.get("errors", [])
+        if not errors:
+            body = resp.get("body", {})
+            if isinstance(body, dict):
+                errors = body.get("errors", [])
+
+        if errors and isinstance(errors, list):
             msg = errors[0].get("message", "Unknown error")
         else:
-            msg = str(body) if body else "Empty response body"
+            msg = "Empty response body"
 
         if status in (401, 403):
             logger.error(
@@ -189,6 +202,40 @@ class CrowdStrikeClient:
 
         logger.error("%s failed (HTTP %s): %s", operation, status, msg)
         raise CrowdStrikeError(f"{operation} failed (HTTP {status}): {msg}")
+
+    @staticmethod
+    def _extract_job_id(resp: dict[str, Any]) -> str | None:
+        """
+        Extract the job ID from a ``start_search`` response.
+
+        The NGSIEM ``start_search`` endpoint returns the job ID inside
+        ``resources`` at the top level of the FalconPy response::
+
+            {"status_code": 200, "headers": {...},
+             "resources": {"id": "abc123", "hashedQueryOnView": "..."}}
+
+        ``resources`` is typically a dict for this endpoint, but we also
+        handle it as a list for robustness.
+
+        Args:
+            resp: The full response dict from _check_response.
+
+        Returns:
+            The job ID string, or None if not found.
+        """
+        resources = resp.get("resources")
+
+        if isinstance(resources, dict):
+            return resources.get("id")
+        if isinstance(resources, list) and resources:
+            first = resources[0]
+            return first.get("id") if isinstance(first, dict) else None
+
+        # Fallback: check body.id or top-level id
+        body = resp.get("body", {})
+        if isinstance(body, dict) and "id" in body:
+            return body["id"]
+        return resp.get("id")
 
     # -------------------------------------------------------------------------
     # Time Normalization
@@ -300,15 +347,16 @@ class CrowdStrikeClient:
         )
 
         try:
-            body = self._check_response(response, "Query submission")
+            resp = self._check_response(response, "Query submission")
         except AuthenticationError:
             raise
         except CrowdStrikeError as e:
             raise QuerySubmissionError(str(e)) from e
 
-        job_id = body.get("id")
+        # start_search returns: {"status_code": 200, "resources": {"id": "..."}}
+        job_id = self._extract_job_id(resp)
         if not job_id:
-            logger.error("No job ID in response body: %s", body)
+            logger.error("No job ID in response: %s", resp)
             raise QuerySubmissionError("No job ID in response")
 
         logger.debug("Submitted query, job_id=%s", job_id)
@@ -319,8 +367,8 @@ class CrowdStrikeClient:
         Get the status of a query job.
 
         The NG-SIEM API returns status and results in the same call.
-        The response includes ``done`` (bool), ``events`` (list), and
-        ``metaData`` (dict with ``eventCount``, etc.).
+        The response ``body`` includes ``done`` (bool), ``events`` (list),
+        and ``metaData`` (dict with ``eventCount``, etc.).
 
         Args:
             job_id: The job ID returned from submit_query.
@@ -338,9 +386,12 @@ class CrowdStrikeClient:
         )
 
         try:
-            return self._check_response(response, "Query status")
+            resp = self._check_response(response, "Query status")
         except CrowdStrikeError as e:
             raise QueryStatusError(str(e)) from e
+
+        # get_search_status returns: {"status_code": 200, "body": {"done": ..., "events": [...]}}
+        return resp.get("body", resp)
 
     async def get_query_results(self, job_id: str) -> dict[str, Any]:
         """
