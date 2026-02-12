@@ -703,3 +703,111 @@ class TestRun:
         assert result.mode == ExecutionMode.ITERATIVE
         assert result.total_cids == 2  # Two CIDs in mock registry
         assert result.total_execution_time_seconds > 0
+
+    @pytest.mark.asyncio
+    async def test_run_batch_success_counts_all_cids_successful(
+        self, mock_config_file, mock_registry_file, mock_query_file, tmp_path
+    ):
+        """In batch mode, a successful query should mark all CIDs as successful."""
+        mock_client = MagicMock()
+        mock_client.close = AsyncMock()
+        mock_client.submit_query = AsyncMock(return_value="job-1")
+        mock_client.get_query_status = AsyncMock(return_value={
+            "done": True, "events": [{"data": "test"}],
+            "metaData": {"eventCount": 1},
+        })
+
+        with patch("arbitrary_queries.runner.get_credentials") as mock_creds, \
+             patch("arbitrary_queries.runner.CrowdStrikeClient", return_value=mock_client):
+            mock_creds.return_value = MagicMock()
+
+            result = await run(
+                config_path=mock_config_file,
+                query_path=mock_query_file,
+                mode=ExecutionMode.BATCH,
+            )
+
+        assert result.total_cids == 2
+        assert result.successful_cids == 2
+        assert result.failed_cids == 0
+
+    @pytest.mark.asyncio
+    async def test_run_batch_failure_counts_all_cids_failed(
+        self, mock_config_file, mock_registry_file, mock_query_file, tmp_path
+    ):
+        """In batch mode, a failed query should mark all CIDs as failed."""
+        mock_client = MagicMock()
+        mock_client.close = AsyncMock()
+
+        # Mock run_batch to return a QueryResult with an error
+        failed_result = QueryResult(
+            cid="batch",
+            cid_name="Batch (2 CIDs)",
+            events=(),
+            record_count=0,
+            error="Query timed out after 3600s",
+            execution_time_seconds=3600.0,
+        )
+
+        with patch("arbitrary_queries.runner.get_credentials") as mock_creds, \
+             patch("arbitrary_queries.runner.CrowdStrikeClient", return_value=mock_client), \
+             patch("arbitrary_queries.runner.QueryExecutor") as mock_executor_cls:
+            mock_creds.return_value = MagicMock()
+            mock_executor = MagicMock()
+            mock_executor.run_batch = AsyncMock(return_value=failed_result)
+            mock_executor_cls.return_value = mock_executor
+
+            result = await run(
+                config_path=mock_config_file,
+                query_path=mock_query_file,
+                mode=ExecutionMode.BATCH,
+            )
+
+        assert result.total_cids == 2
+        assert result.successful_cids == 0
+        assert result.failed_cids == 2
+
+    @pytest.mark.asyncio
+    async def test_run_iterative_counts_match_individual_outcomes(
+        self, mock_config_file, mock_registry_file, mock_query_file, tmp_path
+    ):
+        """In iterative mode, successful/failed counts should reflect per-CID outcomes."""
+        mock_client = MagicMock()
+        mock_client.close = AsyncMock()
+
+        # One CID succeeds, one fails
+        iterative_results = [
+            QueryResult(
+                cid="cid001",
+                cid_name="Test Customer 1",
+                events=({"data": "test"},),
+                record_count=1,
+                execution_time_seconds=5.0,
+            ),
+            QueryResult(
+                cid="cid002",
+                cid_name="Test Customer 2",
+                events=(),
+                record_count=0,
+                error="Query submission failed",
+                execution_time_seconds=2.0,
+            ),
+        ]
+
+        with patch("arbitrary_queries.runner.get_credentials") as mock_creds, \
+             patch("arbitrary_queries.runner.CrowdStrikeClient", return_value=mock_client), \
+             patch("arbitrary_queries.runner.QueryExecutor") as mock_executor_cls:
+            mock_creds.return_value = MagicMock()
+            mock_executor = MagicMock()
+            mock_executor.run_iterative = AsyncMock(return_value=iterative_results)
+            mock_executor_cls.return_value = mock_executor
+
+            result = await run(
+                config_path=mock_config_file,
+                query_path=mock_query_file,
+                mode=ExecutionMode.ITERATIVE,
+            )
+
+        assert result.total_cids == 2
+        assert result.successful_cids == 1
+        assert result.failed_cids == 1
