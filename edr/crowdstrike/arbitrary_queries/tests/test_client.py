@@ -1,14 +1,12 @@
 """
 Tests for arbitrary_queries.client module.
 
-Tests async CrowdStrike API client wrapper using FalconPy and aiohttp.
+Tests the async CrowdStrike API client wrapper built on FalconPy's NGSIEM
+service class. All FalconPy calls are mocked — no network access required.
 """
 
 import pytest
 from unittest.mock import MagicMock, patch, AsyncMock
-from datetime import datetime, timezone, timedelta
-
-import aiohttp
 
 from arbitrary_queries.client import (
     CrowdStrikeClient,
@@ -16,17 +14,14 @@ from arbitrary_queries.client import (
     AuthenticationError,
     QuerySubmissionError,
     QueryStatusError,
-    TOKEN_REFRESH_BUFFER_SECONDS,
 )
 from arbitrary_queries.secrets import Credentials
 from arbitrary_queries.config import CrowdStrikeConfig
 
 
-class MockResult:
-    """Mock Result object for testing."""
-    def __init__(self, status_code: int, body: dict):
-        self.status_code = status_code
-        self.body = body
+# =============================================================================
+# Fixtures
+# =============================================================================
 
 
 @pytest.fixture
@@ -48,319 +43,460 @@ def mock_cs_config():
 
 
 @pytest.fixture
-def mock_oauth():
-    """Mock OAuth2 client that returns valid tokens."""
-    with patch("arbitrary_queries.client.OAuth2") as mock:
-        with patch("arbitrary_queries.client.Result", MockResult):
-            mock_instance = MagicMock()
-            mock_result = MockResult(status_code=201, body={"access_token": "test-token", "expires_in": 1800})
-            mock_instance.token.return_value = mock_result
-            mock.return_value = mock_instance
-            yield mock
+def mock_falcon():
+    """Mock FalconPy NGSIEM service class."""
+    with patch("arbitrary_queries.client.NGSIEM") as mock_cls:
+        mock_instance = MagicMock()
+        mock_cls.return_value = mock_instance
+        yield mock_instance
 
 
 @pytest.fixture
-def client(mock_credentials, mock_cs_config, mock_oauth):
-    """Create a CrowdStrikeClient for testing."""
+def client(mock_credentials, mock_cs_config, mock_falcon):
+    """Create a CrowdStrikeClient with mocked FalconPy backend."""
     return CrowdStrikeClient(
         credentials=mock_credentials,
         config=mock_cs_config,
     )
 
 
+# =============================================================================
+# Helpers
+# =============================================================================
+
+
+def falcon_response(status_code: int, body: dict) -> dict:
+    """Build a FalconPy-style response dict."""
+    return {"status_code": status_code, "headers": {}, "body": body}
+
+
+# =============================================================================
+# CrowdStrikeClient Init
+# =============================================================================
+
+
 class TestCrowdStrikeClientInit:
     """Tests for CrowdStrikeClient initialization."""
 
-    def test_client_init_with_credentials(self, mock_credentials, mock_cs_config, mock_oauth):
-        """Client should initialize with credentials and config."""
+    def test_init_stores_base_url_and_repository(
+        self, mock_credentials, mock_cs_config, mock_falcon
+    ):
+        """Client should store base_url and repository from config."""
         client = CrowdStrikeClient(
             credentials=mock_credentials,
             config=mock_cs_config,
         )
-        
+
         assert client.base_url == "https://api.laggar.gcw.crowdstrike.com"
         assert client.repository == "search-all"
 
-    def test_client_init_authenticates(self, mock_credentials, mock_cs_config):
-        """Client should authenticate on initialization."""
-        with patch("arbitrary_queries.client.OAuth2") as mock_oauth:
-            with patch("arbitrary_queries.client.Result", MockResult):
-                mock_instance = MagicMock()
-                mock_result = MockResult(status_code=201, body={"access_token": "my-token", "expires_in": 1800})
-                mock_instance.token.return_value = mock_result
-                mock_oauth.return_value = mock_instance
-                
-                client = CrowdStrikeClient(
-                    credentials=mock_credentials,
-                    config=mock_cs_config,
-                )
-                
-                mock_oauth.assert_called_once()
-                assert client._access_token == "my-token"
+    def test_init_creates_ngsiem_instance(self, mock_credentials, mock_cs_config):
+        """Client should create NGSIEM instance with credentials."""
+        with patch("arbitrary_queries.client.NGSIEM") as mock_cls:
+            CrowdStrikeClient(
+                credentials=mock_credentials,
+                config=mock_cs_config,
+            )
 
-    def test_client_init_sets_token_expiry_with_buffer(self, mock_credentials, mock_cs_config):
-        """Client should set token expiry with refresh buffer."""
-        with patch("arbitrary_queries.client.OAuth2") as mock_oauth:
-            with patch("arbitrary_queries.client.Result", MockResult):
-                mock_instance = MagicMock()
-                mock_result = MockResult(status_code=201, body={"access_token": "token", "expires_in": 1800})
-                mock_instance.token.return_value = mock_result
-                mock_oauth.return_value = mock_instance
-                
-                before = datetime.now(timezone.utc)
-                client = CrowdStrikeClient(
-                    credentials=mock_credentials,
-                    config=mock_cs_config,
-                )
-                after = datetime.now(timezone.utc)
-                
-                # Token expiry should be set (not None)
-                assert client._token_expires_at is not None
-                
-                # Token expiry should be ~1800 - 60 = 1740 seconds from now
-                expected_min = before + timedelta(seconds=1800 - TOKEN_REFRESH_BUFFER_SECONDS - 1)
-                expected_max = after + timedelta(seconds=1800 - TOKEN_REFRESH_BUFFER_SECONDS + 1)
-                
-                assert expected_min <= client._token_expires_at <= expected_max
+            mock_cls.assert_called_once_with(
+                client_id="test-client-id",
+                client_secret="test-client-secret",
+                base_url="https://api.laggar.gcw.crowdstrike.com",
+            )
 
-    def test_client_init_auth_failure(self, mock_credentials, mock_cs_config):
-        """Client should raise AuthenticationError on auth failure."""
-        with patch("arbitrary_queries.client.OAuth2") as mock_oauth:
-            with patch("arbitrary_queries.client.Result", MockResult):
-                mock_instance = MagicMock()
-                mock_result = MockResult(status_code=401, body={"errors": [{"message": "Invalid credentials"}]})
-                mock_instance.token.return_value = mock_result
-                mock_oauth.return_value = mock_instance
-                
-                with pytest.raises(AuthenticationError) as exc_info:
-                    CrowdStrikeClient(
-                        credentials=mock_credentials,
-                        config=mock_cs_config,
-                    )
-                
-                assert "authentication" in str(exc_info.value).lower()
-
-    def test_client_init_unexpected_response_type(self, mock_credentials, mock_cs_config):
-        """Client should raise AuthenticationError for non-Result response."""
-        with patch("arbitrary_queries.client.OAuth2") as mock_oauth:
-            with patch("arbitrary_queries.client.Result", MockResult):
-                mock_instance = MagicMock()
-                # Return a plain dict instead of a Result object
-                mock_instance.token.return_value = {"status_code": 201, "body": {}}
-                mock_oauth.return_value = mock_instance
-                
-                with pytest.raises(AuthenticationError) as exc_info:
-                    CrowdStrikeClient(
-                        credentials=mock_credentials,
-                        config=mock_cs_config,
-                    )
-                
-                assert "unexpected response type" in str(exc_info.value).lower()
-
-    def test_client_init_no_session(self, client):
-        """Client should not create session on init."""
-        assert client._session is None
-        assert client._owns_session is False
+    def test_init_defers_authentication(self, client, mock_falcon):
+        """Client should not call any API methods during init."""
+        mock_falcon.start_search.assert_not_called()
+        mock_falcon.get_search_status.assert_not_called()
+        mock_falcon.stop_search.assert_not_called()
 
 
-class TestAsyncContextManager:
-    """Tests for async context manager support."""
+# =============================================================================
+# _as_dict
+# =============================================================================
 
-    @pytest.mark.asyncio
-    async def test_context_manager_creates_session(self, mock_credentials, mock_cs_config, mock_oauth):
-        """Context manager should create aiohttp session."""
-        client = CrowdStrikeClient(
-            credentials=mock_credentials,
-            config=mock_cs_config,
+
+class TestAsDict:
+    """Tests for _as_dict static method."""
+
+    def test_as_dict_passthrough_for_dict(self):
+        """_as_dict should return a dict unchanged."""
+        resp = {"status_code": 200, "body": {"id": "abc"}}
+
+        assert CrowdStrikeClient._as_dict(resp) is resp
+
+    def test_as_dict_extracts_full_return_from_result(self):
+        """_as_dict should use full_return for non-dict responses."""
+        mock_result = MagicMock()
+        mock_result.full_return = {"status_code": 200, "body": {"id": "abc"}}
+
+        result = CrowdStrikeClient._as_dict(mock_result)
+
+        assert result == {"status_code": 200, "body": {"id": "abc"}}
+
+
+# =============================================================================
+# _check_response
+# =============================================================================
+
+
+class TestCheckResponse:
+    """Tests for _check_response method."""
+
+    def test_check_response_returns_body_on_200(self, client):
+        """_check_response should return body dict on HTTP 200."""
+        resp = falcon_response(200, {"id": "job-123", "done": False})
+
+        body = client._check_response(resp, "Test operation")
+
+        assert body == {"id": "job-123", "done": False}
+
+    def test_check_response_returns_body_on_201(self, client):
+        """_check_response should return body dict on HTTP 201."""
+        resp = falcon_response(201, {"id": "job-456"})
+
+        body = client._check_response(resp, "Test operation")
+
+        assert body == {"id": "job-456"}
+
+    def test_check_response_raises_auth_error_on_401(self, client):
+        """_check_response should raise AuthenticationError on HTTP 401."""
+        resp = falcon_response(
+            401,
+            {"errors": [{"message": "access denied"}]},
         )
-        
-        async with client as ctx_client:
-            assert ctx_client._session is not None
-            assert isinstance(ctx_client._session, aiohttp.ClientSession)
-            assert ctx_client._owns_session is True
 
-    @pytest.mark.asyncio
-    async def test_context_manager_closes_session(self, mock_credentials, mock_cs_config, mock_oauth):
-        """Context manager should close session on exit."""
-        client = CrowdStrikeClient(
-            credentials=mock_credentials,
-            config=mock_cs_config,
+        with pytest.raises(AuthenticationError) as exc_info:
+            client._check_response(resp, "Query submission")
+
+        assert "401" in str(exc_info.value)
+        assert "access denied" in str(exc_info.value)
+
+    def test_check_response_raises_auth_error_on_403(self, client):
+        """_check_response should raise AuthenticationError on HTTP 403."""
+        resp = falcon_response(
+            403,
+            {"errors": [{"message": "insufficient scope"}]},
         )
-        
-        async with client:
-            session = client._session
-        
-        assert client._session is None
-        assert session is not None
-        assert session.closed
 
-    @pytest.mark.asyncio
-    async def test_close_method(self, mock_credentials, mock_cs_config, mock_oauth):
-        """close() should close session when called directly."""
-        client = CrowdStrikeClient(
-            credentials=mock_credentials,
-            config=mock_cs_config,
+        with pytest.raises(AuthenticationError) as exc_info:
+            client._check_response(resp, "Query submission")
+
+        assert "403" in str(exc_info.value)
+        assert "insufficient scope" in str(exc_info.value)
+
+    def test_check_response_includes_http_status_in_auth_error(self, client):
+        """_check_response should include HTTP status code in AuthenticationError."""
+        resp = falcon_response(403, {"errors": [{"message": "forbidden"}]})
+
+        with pytest.raises(AuthenticationError) as exc_info:
+            client._check_response(resp, "Query submission")
+
+        assert "HTTP 403" in str(exc_info.value)
+
+    def test_check_response_raises_crowdstrike_error_on_500(self, client):
+        """_check_response should raise CrowdStrikeError on HTTP 500."""
+        resp = falcon_response(
+            500,
+            {"errors": [{"message": "internal server error"}]},
         )
-        
-        # Manually create session
-        client._session = aiohttp.ClientSession()
-        client._owns_session = True
-        session = client._session
-        
-        await client.close()
-        
-        assert client._session is None
-        assert session.closed
 
-
-class TestMakeRequest:
-    """Tests for _make_request method."""
-
-    @pytest.mark.asyncio
-    async def test_make_request_success(self, client):
-        """_make_request should return JSON response on success."""
-        mock_response = AsyncMock()
-        mock_response.raise_for_status = MagicMock()
-        mock_response.content_length = 100
-        mock_response.json = AsyncMock(return_value={"data": "test"})
-        
-        mock_session = AsyncMock()
-        mock_session.request = MagicMock(return_value=AsyncMock(__aenter__=AsyncMock(return_value=mock_response)))
-        
-        client._session = mock_session
-        
-        result = await client._make_request(method="GET", endpoint="/test")
-        
-        assert result == {"data": "test"}
-
-    @pytest.mark.asyncio
-    async def test_make_request_empty_response(self, client):
-        """_make_request should return empty dict for empty response."""
-        mock_response = AsyncMock()
-        mock_response.raise_for_status = MagicMock()
-        mock_response.content_length = 0
-        
-        mock_session = AsyncMock()
-        mock_session.request = MagicMock(return_value=AsyncMock(__aenter__=AsyncMock(return_value=mock_response)))
-        
-        client._session = mock_session
-        
-        result = await client._make_request(method="DELETE", endpoint="/test")
-        
-        assert result == {}
-
-    @pytest.mark.asyncio
-    async def test_make_request_includes_auth_header(self, client):
-        """_make_request should include Authorization header."""
-        mock_response = AsyncMock()
-        mock_response.raise_for_status = MagicMock()
-        mock_response.content_length = 100
-        mock_response.json = AsyncMock(return_value={})
-        
-        mock_request = MagicMock(return_value=AsyncMock(__aenter__=AsyncMock(return_value=mock_response)))
-        mock_session = AsyncMock()
-        mock_session.request = mock_request
-        
-        client._session = mock_session
-        client._access_token = "my-token"
-        
-        await client._make_request(method="GET", endpoint="/test")
-        
-        call_kwargs = mock_request.call_args[1]
-        assert call_kwargs["headers"]["Authorization"] == "Bearer my-token"
-
-    @pytest.mark.asyncio
-    async def test_make_request_raises_on_client_error(self, client):
-        """_make_request should raise CrowdStrikeError on aiohttp error."""
-        mock_session = AsyncMock()
-        mock_session.request = MagicMock(
-            return_value=AsyncMock(__aenter__=AsyncMock(side_effect=aiohttp.ClientError("Connection failed")))
-        )
-        
-        client._session = mock_session
-        
         with pytest.raises(CrowdStrikeError) as exc_info:
-            await client._make_request(method="GET", endpoint="/test")
-        
-        assert "request failed" in str(exc_info.value).lower()
+            client._check_response(resp, "Query status")
 
-    @pytest.mark.asyncio
-    async def test_make_request_refreshes_expired_token(self, client):
-        """_make_request should refresh token if expired."""
-        # Set token as expired
-        client._token_expires_at = datetime.now(timezone.utc) - timedelta(seconds=10)
-        
-        mock_response = AsyncMock()
-        mock_response.raise_for_status = MagicMock()
-        mock_response.content_length = 100
-        mock_response.json = AsyncMock(return_value={})
-        
-        mock_session = AsyncMock()
-        mock_session.request = MagicMock(return_value=AsyncMock(__aenter__=AsyncMock(return_value=mock_response)))
-        
-        client._session = mock_session
-        
-        with patch.object(client, "_refresh_token") as mock_refresh:
-            await client._make_request(method="GET", endpoint="/test")
-            mock_refresh.assert_called_once()
+        assert "500" in str(exc_info.value)
+
+    def test_check_response_handles_empty_body(self, client):
+        """_check_response should produce readable error for empty body."""
+        resp = falcon_response(401, {})
+
+        with pytest.raises(AuthenticationError) as exc_info:
+            client._check_response(resp, "Query submission")
+
+        # Should NOT be just "Query submission: {}"
+        assert "Empty response body" in str(exc_info.value)
+
+    def test_check_response_handles_empty_errors_list(self, client):
+        """_check_response should fall back to str(body) when errors list is empty."""
+        resp = falcon_response(429, {"errors": [], "message": "rate limited"})
+
+        with pytest.raises(CrowdStrikeError) as exc_info:
+            client._check_response(resp, "Query submission")
+
+        assert "rate limited" in str(exc_info.value)
+
+    def test_check_response_handles_missing_status_code(self, client):
+        """_check_response should treat missing status_code as failure."""
+        resp = {"body": {"id": "abc"}}
+
+        with pytest.raises(CrowdStrikeError):
+            client._check_response(resp, "Test operation")
+
+    def test_check_response_logs_debug_on_success(self, client, caplog):
+        """_check_response should log response at DEBUG level."""
+        resp = falcon_response(200, {"id": "job-123"})
+
+        import logging
+
+        with caplog.at_level(logging.DEBUG, logger="arbitrary_queries.client"):
+            client._check_response(resp, "Test operation")
+
+        assert "200" in caplog.text
+        assert "Test operation" in caplog.text
+
+    def test_check_response_logs_error_on_auth_failure(self, client, caplog):
+        """_check_response should log at ERROR level on auth failure."""
+        resp = falcon_response(
+            403, {"errors": [{"message": "forbidden"}]}
+        )
+
+        import logging
+
+        with caplog.at_level(logging.ERROR, logger="arbitrary_queries.client"):
+            with pytest.raises(AuthenticationError):
+                client._check_response(resp, "Query submission")
+
+        assert "authorization failure" in caplog.text.lower()
+
+
+# =============================================================================
+# _normalize_time
+# =============================================================================
+
+
+class TestNormalizeTime:
+    """Tests for _normalize_time static method."""
+
+    def test_strips_dash_from_relative_days(self):
+        """_normalize_time should strip leading dash from '-7d'."""
+        assert CrowdStrikeClient._normalize_time("-7d") == "7d"
+
+    def test_strips_dash_from_relative_hours(self):
+        """_normalize_time should strip leading dash from '-24h'."""
+        assert CrowdStrikeClient._normalize_time("-24h") == "24h"
+
+    def test_strips_dash_from_relative_minutes(self):
+        """_normalize_time should strip leading dash from '-30m'."""
+        assert CrowdStrikeClient._normalize_time("-30m") == "30m"
+
+    def test_strips_dash_from_relative_seconds(self):
+        """_normalize_time should strip leading dash from '-300s'."""
+        assert CrowdStrikeClient._normalize_time("-300s") == "300s"
+
+    def test_strips_dash_from_relative_weeks(self):
+        """_normalize_time should strip leading dash from '-2w'."""
+        assert CrowdStrikeClient._normalize_time("-2w") == "2w"
+
+    def test_passes_through_positive_relative(self):
+        """_normalize_time should not modify already-correct '7d'."""
+        assert CrowdStrikeClient._normalize_time("7d") == "7d"
+
+    def test_passes_through_now(self):
+        """_normalize_time should not modify 'now'."""
+        assert CrowdStrikeClient._normalize_time("now") == "now"
+
+    def test_passes_through_iso_timestamp(self):
+        """_normalize_time should not modify ISO 8601 timestamps."""
+        ts = "2024-01-01T00:00:00Z"
+        assert CrowdStrikeClient._normalize_time(ts) == ts
+
+    def test_passes_through_empty_string(self):
+        """_normalize_time should return empty string unchanged."""
+        assert CrowdStrikeClient._normalize_time("") == ""
+
+    def test_passes_through_iso_with_negative_offset(self):
+        """_normalize_time should not strip dash from ISO timestamps with negative offset."""
+        ts = "2024-01-01T00:00:00-05:00"
+        assert CrowdStrikeClient._normalize_time(ts) == ts
+
+
+# =============================================================================
+# _build_cid_filter
+# =============================================================================
+
+
+class TestBuildCIDFilter:
+    """Tests for _build_cid_filter static method."""
+
+    def test_single_cid(self):
+        """_build_cid_filter should handle single CID."""
+        result = CrowdStrikeClient._build_cid_filter(["abc123"])
+
+        assert "abc123" in result
+        assert "cid" in result.lower()
+
+    def test_multiple_cids(self):
+        """_build_cid_filter should include all CIDs."""
+        result = CrowdStrikeClient._build_cid_filter(["cid1", "cid2", "cid3"])
+
+        assert "cid1" in result
+        assert "cid2" in result
+        assert "cid3" in result
+
+    def test_empty_list(self):
+        """_build_cid_filter should return empty string for empty list."""
+        assert CrowdStrikeClient._build_cid_filter([]) == ""
+
+    def test_logscale_syntax(self):
+        """_build_cid_filter should use LogScale in() filter syntax."""
+        result = CrowdStrikeClient._build_cid_filter(["abc", "def"])
+
+        assert "=~" in result
+        assert "in(" in result
+        assert "values=" in result
+
+
+# =============================================================================
+# submit_query
+# =============================================================================
 
 
 class TestSubmitQuery:
     """Tests for submit_query method."""
 
     @pytest.mark.asyncio
-    async def test_submit_query_success(self, client):
+    async def test_submit_query_success(self, client, mock_falcon):
         """submit_query should return job ID on success."""
-        client._make_request = AsyncMock(return_value={"id": "job-12345"})
-        
+        mock_falcon.start_search.return_value = falcon_response(
+            200, {"id": "job-12345"}
+        )
+
         job_id = await client.submit_query(
             query='#event_simpleName="ProcessRollup2"',
             start_time="-7d",
         )
-        
+
         assert job_id == "job-12345"
 
     @pytest.mark.asyncio
-    async def test_submit_query_with_cid_filter(self, client):
-        """submit_query should include CID filter when provided."""
-        client._make_request = AsyncMock(return_value={"id": "job-123"})
-        
+    async def test_submit_query_passes_correct_args(self, client, mock_falcon):
+        """submit_query should pass correct arguments to FalconPy."""
+        mock_falcon.start_search.return_value = falcon_response(
+            200, {"id": "job-123"}
+        )
+
         await client.submit_query(
-            query='#event_simpleName="ProcessRollup2"',
+            query='#event_simpleName="Test"',
+            start_time="24h",
+            end_time="1h",
+        )
+
+        mock_falcon.start_search.assert_called_once_with(
+            repository="search-all",
+            query_string='#event_simpleName="Test"',
+            start="24h",
+            end="1h",
+            is_live=False,
+        )
+
+    @pytest.mark.asyncio
+    async def test_submit_query_normalizes_dashed_start(self, client, mock_falcon):
+        """submit_query should strip leading dash from relative start time."""
+        mock_falcon.start_search.return_value = falcon_response(
+            200, {"id": "job-123"}
+        )
+
+        await client.submit_query(
+            query='#event_simpleName="Test"',
+            start_time="-7d",
+            end_time="now",
+        )
+
+        call_kwargs = mock_falcon.start_search.call_args[1]
+        assert call_kwargs["start"] == "7d"
+        assert call_kwargs["end"] == "now"
+
+    @pytest.mark.asyncio
+    async def test_submit_query_normalizes_dashed_end(self, client, mock_falcon):
+        """submit_query should strip leading dash from relative end time."""
+        mock_falcon.start_search.return_value = falcon_response(
+            200, {"id": "job-123"}
+        )
+
+        await client.submit_query(
+            query='#event_simpleName="Test"',
+            start_time="7d",
+            end_time="-1h",
+        )
+
+        call_kwargs = mock_falcon.start_search.call_args[1]
+        assert call_kwargs["end"] == "1h"
+
+    @pytest.mark.asyncio
+    async def test_submit_query_preserves_absolute_timestamps(
+        self, client, mock_falcon
+    ):
+        """submit_query should not modify ISO 8601 timestamps."""
+        mock_falcon.start_search.return_value = falcon_response(
+            200, {"id": "job-123"}
+        )
+
+        await client.submit_query(
+            query='#event_simpleName="Test"',
+            start_time="2024-01-01T00:00:00Z",
+            end_time="2024-01-07T23:59:59Z",
+        )
+
+        call_kwargs = mock_falcon.start_search.call_args[1]
+        assert call_kwargs["start"] == "2024-01-01T00:00:00Z"
+        assert call_kwargs["end"] == "2024-01-07T23:59:59Z"
+
+    @pytest.mark.asyncio
+    async def test_submit_query_with_cid_filter(self, client, mock_falcon):
+        """submit_query should prepend CID filter when CIDs provided."""
+        mock_falcon.start_search.return_value = falcon_response(
+            200, {"id": "job-123"}
+        )
+
+        await client.submit_query(
+            query='#event_simpleName="Test"',
             start_time="-7d",
             cids=["cid1", "cid2"],
         )
-        
-        call_args = client._make_request.call_args
-        payload = call_args[1]["json"]
-        assert "cid" in payload["queryString"].lower()
+
+        call_kwargs = mock_falcon.start_search.call_args[1]
+        query_string = call_kwargs["query_string"]
+
+        assert "cid" in query_string.lower()
+        assert "cid1" in query_string
+        assert "cid2" in query_string
+        assert '#event_simpleName="Test"' in query_string
 
     @pytest.mark.asyncio
-    async def test_submit_query_request_structure(self, client):
-        """submit_query should send correct request structure."""
-        client._make_request = AsyncMock(return_value={"id": "job-123"})
-        
+    async def test_submit_query_no_cid_filter_without_cids(self, client, mock_falcon):
+        """submit_query should not add CID filter when cids is None."""
+        mock_falcon.start_search.return_value = falcon_response(
+            200, {"id": "job-123"}
+        )
+
         await client.submit_query(
             query='#event_simpleName="Test"',
-            start_time="-24h",
-            end_time="now",
+            start_time="-7d",
         )
-        
-        call_args = client._make_request.call_args
-        assert call_args[1]["method"] == "POST"
-        assert "queryjobs" in call_args[1]["endpoint"]
-        
-        payload = call_args[1]["json"]
-        assert "queryString" in payload
-        assert "start" in payload
-        assert "end" in payload
-        assert payload["isLive"] is False
+
+        call_kwargs = mock_falcon.start_search.call_args[1]
+        assert call_kwargs["query_string"] == '#event_simpleName="Test"'
 
     @pytest.mark.asyncio
-    async def test_submit_query_failure(self, client):
-        """submit_query should raise QuerySubmissionError on failure."""
-        client._make_request = AsyncMock(side_effect=CrowdStrikeError("API error"))
-        
+    async def test_submit_query_auth_error_propagates(self, client, mock_falcon):
+        """submit_query should propagate AuthenticationError from _check_response."""
+        mock_falcon.start_search.return_value = falcon_response(
+            401, {"errors": [{"message": "invalid token"}]}
+        )
+
+        with pytest.raises(AuthenticationError):
+            await client.submit_query(
+                query='#event_simpleName="Test"',
+                start_time="-7d",
+            )
+
+    @pytest.mark.asyncio
+    async def test_submit_query_wraps_non_auth_error(self, client, mock_falcon):
+        """submit_query should wrap non-auth CrowdStrikeError as QuerySubmissionError."""
+        mock_falcon.start_search.return_value = falcon_response(
+            500, {"errors": [{"message": "internal error"}]}
+        )
+
         with pytest.raises(QuerySubmissionError):
             await client.submit_query(
                 query='#event_simpleName="Test"',
@@ -368,260 +504,221 @@ class TestSubmitQuery:
             )
 
     @pytest.mark.asyncio
-    async def test_submit_query_missing_id_raises(self, client):
-        """submit_query should raise QuerySubmissionError if response missing id."""
-        client._make_request = AsyncMock(return_value={})
-        
+    async def test_submit_query_missing_job_id(self, client, mock_falcon):
+        """submit_query should raise QuerySubmissionError if response has no id."""
+        mock_falcon.start_search.return_value = falcon_response(
+            200, {"status": "ok"}
+        )
+
+        with pytest.raises(QuerySubmissionError) as exc_info:
+            await client.submit_query(
+                query='#event_simpleName="Test"',
+                start_time="-7d",
+            )
+
+        assert "no job id" in str(exc_info.value).lower()
+
+    @pytest.mark.asyncio
+    async def test_submit_query_empty_body(self, client, mock_falcon):
+        """submit_query should raise QuerySubmissionError for empty body."""
+        mock_falcon.start_search.return_value = falcon_response(200, {})
+
         with pytest.raises(QuerySubmissionError):
             await client.submit_query(
                 query='#event_simpleName="Test"',
                 start_time="-7d",
             )
 
-
-class TestGetJob:
-    """Tests for _get_job helper method."""
-
     @pytest.mark.asyncio
-    async def test_get_job_success(self, client):
-        """_get_job should return job data."""
-        client._make_request = AsyncMock(return_value={
-            "done": True,
-            "events": [{"test": "event"}],
-            "metaData": {"eventCount": 1},
-        })
-        
-        result = await client._get_job("job-123")
-        
-        assert result["done"] is True
-        assert len(result["events"]) == 1
+    async def test_submit_query_default_end_time(self, client, mock_falcon):
+        """submit_query should default end_time to 'now'."""
+        mock_falcon.start_search.return_value = falcon_response(
+            200, {"id": "job-123"}
+        )
 
-    @pytest.mark.asyncio
-    async def test_get_job_failure(self, client):
-        """_get_job should raise QueryStatusError on failure."""
-        client._make_request = AsyncMock(side_effect=CrowdStrikeError("Job not found"))
-        
-        with pytest.raises(QueryStatusError) as exc_info:
-            await client._get_job("nonexistent-job")
-        
-        assert "nonexistent-job" in str(exc_info.value)
+        await client.submit_query(
+            query='#event_simpleName="Test"',
+            start_time="-7d",
+        )
+
+        call_kwargs = mock_falcon.start_search.call_args[1]
+        assert call_kwargs["end"] == "now"
+
+
+# =============================================================================
+# get_query_status
+# =============================================================================
 
 
 class TestGetQueryStatus:
     """Tests for get_query_status method."""
 
     @pytest.mark.asyncio
-    async def test_get_query_status_running(self, client):
+    async def test_get_query_status_running(self, client, mock_falcon):
         """get_query_status should return status for running query."""
-        client._make_request = AsyncMock(return_value={
-            "done": False,
-            "metaData": {
-                "eventCount": 500,
-                "processedEvents": 10000,
+        mock_falcon.get_search_status.return_value = falcon_response(
+            200,
+            {
+                "done": False,
+                "events": [],
+                "metaData": {"eventCount": 500, "processedEvents": 10000},
             },
-        })
-        
+        )
+
         status = await client.get_query_status("job-123")
-        
+
         assert status["done"] is False
         assert status["metaData"]["eventCount"] == 500
 
     @pytest.mark.asyncio
-    async def test_get_query_status_completed(self, client):
-        """get_query_status should return done=True when complete."""
-        client._make_request = AsyncMock(return_value={
-            "done": True,
-            "metaData": {
-                "eventCount": 1500,
-                "processedEvents": 50000,
+    async def test_get_query_status_completed(self, client, mock_falcon, sample_events):
+        """get_query_status should return events when complete."""
+        mock_falcon.get_search_status.return_value = falcon_response(
+            200,
+            {
+                "done": True,
+                "events": sample_events,
+                "metaData": {"eventCount": len(sample_events)},
             },
-        })
-        
+        )
+
         status = await client.get_query_status("job-123")
-        
+
         assert status["done"] is True
-        assert status["metaData"]["eventCount"] == 1500
+        assert len(status["events"]) == 3
 
     @pytest.mark.asyncio
-    async def test_get_query_status_delegates_to_get_job(self, client):
-        """get_query_status should delegate to _get_job."""
-        client._get_job = AsyncMock(return_value={"done": True})
-        
-        await client.get_query_status("job-123")
-        
-        client._get_job.assert_called_once_with("job-123")
+    async def test_get_query_status_passes_correct_args(self, client, mock_falcon):
+        """get_query_status should pass job_id and repository to FalconPy."""
+        mock_falcon.get_search_status.return_value = falcon_response(
+            200, {"done": True, "events": []}
+        )
+
+        await client.get_query_status("job-abc")
+
+        mock_falcon.get_search_status.assert_called_once_with(
+            repository="search-all",
+            search_id="job-abc",
+        )
+
+    @pytest.mark.asyncio
+    async def test_get_query_status_raises_query_status_error(
+        self, client, mock_falcon
+    ):
+        """get_query_status should raise QueryStatusError on failure."""
+        mock_falcon.get_search_status.return_value = falcon_response(
+            500, {"errors": [{"message": "internal error"}]}
+        )
+
+        with pytest.raises(QueryStatusError):
+            await client.get_query_status("job-123")
+
+
+# =============================================================================
+# get_query_results
+# =============================================================================
 
 
 class TestGetQueryResults:
     """Tests for get_query_results method."""
 
     @pytest.mark.asyncio
-    async def test_get_query_results_success(self, client, sample_events):
-        """get_query_results should return events."""
-        client._make_request = AsyncMock(return_value={
-            "done": True,
-            "events": sample_events,
-            "metaData": {"eventCount": len(sample_events)},
-        })
-        
+    async def test_get_query_results_delegates_to_get_query_status(
+        self, client, mock_falcon
+    ):
+        """get_query_results should delegate to get_query_status."""
+        mock_falcon.get_search_status.return_value = falcon_response(
+            200,
+            {"done": True, "events": [{"a": 1}]},
+        )
+
         result = await client.get_query_results("job-123")
-        
-        assert result["events"] == sample_events
-        assert len(result["events"]) == 3
+
+        assert result["events"] == [{"a": 1}]
+        mock_falcon.get_search_status.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_get_query_results_empty(self, client):
+    async def test_get_query_results_empty(self, client, mock_falcon):
         """get_query_results should handle empty results."""
-        client._make_request = AsyncMock(return_value={
-            "done": True,
-            "events": [],
-            "metaData": {"eventCount": 0},
-        })
-        
+        mock_falcon.get_search_status.return_value = falcon_response(
+            200,
+            {"done": True, "events": [], "metaData": {"eventCount": 0}},
+        )
+
         result = await client.get_query_results("job-123")
-        
+
         assert result["events"] == []
 
-    @pytest.mark.asyncio
-    async def test_get_query_results_delegates_to_get_job(self, client):
-        """get_query_results should delegate to _get_job."""
-        client._get_job = AsyncMock(return_value={"done": True, "events": []})
-        
-        await client.get_query_results("job-123")
-        
-        client._get_job.assert_called_once_with("job-123")
+
+# =============================================================================
+# cancel_query
+# =============================================================================
 
 
 class TestCancelQuery:
     """Tests for cancel_query method."""
 
     @pytest.mark.asyncio
-    async def test_cancel_query_success(self, client):
-        """cancel_query should successfully cancel a running query."""
-        client._make_request = AsyncMock(return_value={})
-        
+    async def test_cancel_query_success(self, client, mock_falcon):
+        """cancel_query should call stop_search with correct args."""
+        mock_falcon.stop_search.return_value = falcon_response(200, {})
+
         await client.cancel_query("job-123")
-        
-        call_args = client._make_request.call_args
-        assert call_args[1]["method"] == "DELETE"
+
+        mock_falcon.stop_search.assert_called_once_with(
+            repository="search-all",
+            id="job-123",
+        )
 
     @pytest.mark.asyncio
-    async def test_cancel_query_already_complete(self, client):
-        """cancel_query should handle already-complete queries gracefully."""
-        client._make_request = AsyncMock(return_value={})
-        
+    async def test_cancel_query_logs_warning_on_non_success(
+        self, client, mock_falcon, caplog
+    ):
+        """cancel_query should log warning for non-200/204 status."""
+        mock_falcon.stop_search.return_value = falcon_response(
+            404, {"errors": [{"message": "not found"}]}
+        )
+
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="arbitrary_queries.client"):
+            await client.cancel_query("job-999")
+
+        assert "job-999" in caplog.text
+        assert "404" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_cancel_query_does_not_raise(self, client, mock_falcon):
+        """cancel_query should not raise even on error responses."""
+        mock_falcon.stop_search.return_value = falcon_response(
+            500, {"errors": [{"message": "server error"}]}
+        )
+
         # Should not raise
-        await client.cancel_query("completed-job")
+        await client.cancel_query("job-123")
 
     @pytest.mark.asyncio
-    async def test_cancel_query_logs_on_error(self, client, caplog):
-        """cancel_query should log errors instead of raising."""
-        client._make_request = AsyncMock(side_effect=CrowdStrikeError("Job not found"))
-        
-        # Should not raise
-        await client.cancel_query("nonexistent-job")
-        
-        # Should log the error
-        assert "nonexistent-job" in caplog.text or True  # caplog may need debug level
+    async def test_cancel_query_accepts_204(self, client, mock_falcon, caplog):
+        """cancel_query should accept HTTP 204 without warning."""
+        mock_falcon.stop_search.return_value = falcon_response(204, {})
+
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="arbitrary_queries.client"):
+            await client.cancel_query("job-123")
+
+        assert "Cancel query" not in caplog.text
 
 
-class TestBuildCIDFilter:
-    """Tests for _build_cid_filter helper."""
-
-    def test_build_cid_filter_single_cid(self, client):
-        """_build_cid_filter should handle single CID."""
-        filter_str = client._build_cid_filter(["abc123"])
-        
-        assert "cid" in filter_str.lower()
-        assert "abc123" in filter_str
-
-    def test_build_cid_filter_multiple_cids(self, client):
-        """_build_cid_filter should handle multiple CIDs."""
-        filter_str = client._build_cid_filter(["cid1", "cid2", "cid3"])
-        
-        assert "cid1" in filter_str
-        assert "cid2" in filter_str
-        assert "cid3" in filter_str
-
-    def test_build_cid_filter_empty_list(self, client):
-        """_build_cid_filter should return empty string for empty list."""
-        filter_str = client._build_cid_filter([])
-        
-        assert filter_str == ""
-
-    def test_build_cid_filter_format(self, client):
-        """_build_cid_filter should use correct LogScale filter syntax."""
-        filter_str = client._build_cid_filter(["abc", "def"])
-        
-        # Should be: cid =~ in(values=["abc", "def"])
-        assert "=~" in filter_str
-        assert "in(" in filter_str
-        assert "values=" in filter_str
+# =============================================================================
+# close
+# =============================================================================
 
 
-class TestTokenRefresh:
-    """Tests for token refresh handling."""
-
-    def test_token_refresh_calls_authenticate(self, client):
-        """_refresh_token should call _authenticate."""
-        with patch.object(client, "_authenticate") as mock_auth:
-            client._refresh_token()
-            mock_auth.assert_called_once()
+class TestClose:
+    """Tests for close method."""
 
     @pytest.mark.asyncio
-    async def test_ensure_token_valid_refreshes_when_expired(self, client):
-        """_ensure_token_valid should refresh expired token."""
-        client._token_expires_at = datetime.now(timezone.utc) - timedelta(seconds=10)
-        
-        with patch.object(client, "_refresh_token") as mock_refresh:
-            await client._ensure_token_valid()
-            mock_refresh.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_ensure_token_valid_skips_when_valid(self, client):
-        """_ensure_token_valid should not refresh valid token."""
-        client._token_expires_at = datetime.now(timezone.utc) + timedelta(seconds=1000)
-        
-        with patch.object(client, "_refresh_token") as mock_refresh:
-            await client._ensure_token_valid()
-            mock_refresh.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_ensure_token_valid_refreshes_when_none(self, client):
-        """_ensure_token_valid should refresh when expiry is None."""
-        client._token_expires_at = None
-        
-        with patch.object(client, "_refresh_token") as mock_refresh:
-            await client._ensure_token_valid()
-            mock_refresh.assert_called_once()
-
-
-class TestGetSession:
-    """Tests for _get_session helper."""
-
-    @pytest.mark.asyncio
-    async def test_get_session_creates_if_none(self, client):
-        """_get_session should create session if none exists."""
-        assert client._session is None
-        
-        session = await client._get_session()
-        
-        assert session is not None
-        assert client._owns_session is True
-        
-        # Cleanup
-        await session.close()
-
-    @pytest.mark.asyncio
-    async def test_get_session_reuses_existing(self, client):
-        """_get_session should reuse existing session."""
-        client._session = aiohttp.ClientSession()
-        client._owns_session = True
-        original_session = client._session
-        
-        session = await client._get_session()
-        
-        assert session is original_session
-        
-        # Cleanup
-        await session.close()
+    async def test_close_is_noop(self, client):
+        """close should complete without error (FalconPy manages its own session)."""
+        await client.close()
