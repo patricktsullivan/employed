@@ -139,7 +139,9 @@ class CrowdStrikeClient:
         # Fallback: Result objects have a full_return property
         return response.full_return  # type: ignore[union-attr]
 
-    def _check_response(self, response: dict[str, Any] | Any, operation: str) -> dict[str, Any]:
+    def _check_response(
+        self, response: dict[str, Any] | Any, operation: str
+    ) -> dict[str, Any]:
         """
         Validate a FalconPy response and extract the body.
 
@@ -160,16 +162,66 @@ class CrowdStrikeClient:
         """
         resp = self._as_dict(response)
         status = resp.get("status_code", 0)
-        if status in (200, 201):
-            return resp.get("body", {})
-
         body = resp.get("body", {})
-        errors = body.get("errors", [])
-        msg = errors[0].get("message", "Unknown error") if errors else str(body)
+
+        logger.debug(
+            "%s response: HTTP %s, body keys=%s",
+            operation,
+            status,
+            list(body.keys()) if isinstance(body, dict) else type(body).__name__,
+        )
+
+        if status in (200, 201):
+            return body
+
+        # Extract error message from standard CrowdStrike error envelope
+        errors = body.get("errors", []) if isinstance(body, dict) else []
+        if errors:
+            msg = errors[0].get("message", "Unknown error")
+        else:
+            msg = str(body) if body else "Empty response body"
 
         if status in (401, 403):
-            raise AuthenticationError(f"{operation}: {msg}")
+            logger.error(
+                "%s authorization failure (HTTP %s): %s", operation, status, msg
+            )
+            raise AuthenticationError(f"{operation} (HTTP {status}): {msg}")
+
+        logger.error("%s failed (HTTP %s): %s", operation, status, msg)
         raise CrowdStrikeError(f"{operation} failed (HTTP {status}): {msg}")
+
+    # -------------------------------------------------------------------------
+    # Time Normalization
+    # -------------------------------------------------------------------------
+
+    @staticmethod
+    def _normalize_time(value: str) -> str:
+        """
+        Normalize a time string for the LogScale API.
+
+        LogScale uses positive relative times: ``"7d"`` means "7 days ago",
+        ``"24h"`` means "24 hours ago". A leading dash (e.g., ``"-7d"``) is
+        common in other tools but causes an HTTP 400 from LogScale.
+
+        This method strips the leading dash from relative times while leaving
+        absolute timestamps (ISO 8601) and keywords (``"now"``) unchanged.
+
+        Args:
+            value: Time string, e.g. "-7d", "7d", "now", "2024-01-01T00:00:00Z".
+
+        Returns:
+            Normalized time string safe for the LogScale API.
+        """
+        if not value:
+            return value
+
+        # Relative times: optional dash, digits, then a unit letter (s/m/h/d/w)
+        stripped = value.lstrip("-")
+        if stripped and stripped[-1] in "smhdw" and stripped[:-1].isdigit():
+            return stripped
+
+        # Absolute timestamps, "now", or anything else — pass through unchanged
+        return value
 
     # -------------------------------------------------------------------------
     # CID Filter
@@ -225,12 +277,25 @@ class CrowdStrikeClient:
             cid_filter = self._build_cid_filter(cids)
             full_query = f"{cid_filter} | {query}"
 
+        # LogScale uses positive relative times ("7d", not "-7d")
+        normalized_start = self._normalize_time(start_time)
+        normalized_end = self._normalize_time(end_time)
+
+        logger.debug(
+            "Submitting query to %s/%s (start=%s, end=%s): %s",
+            self.base_url,
+            self.repository,
+            normalized_start,
+            normalized_end,
+            full_query[:200],
+        )
+
         response = await asyncio.to_thread(
             self._falcon.start_search,
             repository=self.repository,
             query_string=full_query,
-            start=start_time,
-            end=end_time,
+            start=normalized_start,
+            end=normalized_end,
             is_live=False,
         )
 
@@ -243,6 +308,7 @@ class CrowdStrikeClient:
 
         job_id = body.get("id")
         if not job_id:
+            logger.error("No job ID in response body: %s", body)
             raise QuerySubmissionError("No job ID in response")
 
         logger.debug("Submitted query, job_id=%s", job_id)
