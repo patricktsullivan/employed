@@ -34,7 +34,7 @@ def sample_config_dict():
             "repository": "search-all",
         },
         "query_defaults": {
-            "time_range": "-7d",
+            "time_range": "7d",
             "poll_interval_seconds": 60,
             "timeout_seconds": 3600,
         },
@@ -109,12 +109,12 @@ class TestQueryDefaults:
     def test_create_query_defaults(self):
         """QueryDefaults should store query settings."""
         config = QueryDefaults(
-            time_range="-7d",
+            time_range="7d",
             poll_interval_seconds=60,
             timeout_seconds=3600,
         )
         
-        assert config.time_range == "-7d"
+        assert config.time_range == "7d"
         assert config.poll_interval_seconds == 60
         assert config.timeout_seconds == 3600
 
@@ -122,7 +122,7 @@ class TestQueryDefaults:
         """QueryDefaults should have sensible defaults."""
         config = QueryDefaults()
         
-        assert config.time_range == "-7d"
+        assert config.time_range == "7d"
         assert config.poll_interval_seconds == 60
         assert config.timeout_seconds == 3600
 
@@ -183,7 +183,7 @@ class TestLoadConfigFromJson:
         
         assert config.onepassword.client_id_ref == "op://Vault/CrowdStrike/client_id"
         assert config.crowdstrike.base_url == "https://api.laggar.gcw.crowdstrike.com"
-        assert config.query_defaults.time_range == "-7d"
+        assert config.query_defaults.time_range == "7d"
         assert config.concurrency.max_concurrent_queries == 50
 
     def test_load_json_config_with_path_string(self, sample_json_config_file):
@@ -226,7 +226,7 @@ class TestLoadConfigFromJson:
         
         # Should use defaults
         assert config.crowdstrike.base_url == "https://api.laggar.gcw.crowdstrike.com"
-        assert config.query_defaults.time_range == "-7d"
+        assert config.query_defaults.time_range == "7d"
         assert config.concurrency.max_concurrent_queries == 50
 
 
