@@ -1,18 +1,28 @@
 """
-CrowdStrike API client wrapper.
+CrowdStrike NG-SIEM API client wrapper.
 
-Provides a high-level async interface to the CrowdStrike NG-SIEM API
-using the FalconPy SDK for authentication and aiohttp for async requests.
+Provides an async interface to the CrowdStrike NG-SIEM API using
+FalconPy's NGSIEM service class. FalconPy handles authentication,
+token refresh, and HTTP session management internally.
+
+Async bridge: Since FalconPy is synchronous (built on ``requests``),
+all API calls are dispatched via ``asyncio.to_thread()`` to avoid
+blocking the event loop. This enables concurrent query execution
+across multiple CIDs while leveraging FalconPy's battle-tested
+HTTP and auth handling.
+
+Thread safety note: FalconPy uses ``requests.Session`` internally,
+which is not officially thread-safe. At typical concurrency levels
+(≤50 concurrent queries), this works reliably in practice. If issues
+arise at higher concurrency, consider per-thread NGSIEM instances
+or a threading lock around API calls.
 """
 
 import asyncio
 import logging
-from datetime import datetime, timezone, timedelta
 from typing import Any
 
-import aiohttp
-from falconpy import OAuth2
-from falconpy._result import Result
+from falconpy import NGSIEM
 
 from arbitrary_queries.secrets import Credentials
 from arbitrary_queries.config import CrowdStrikeConfig
@@ -20,47 +30,63 @@ from arbitrary_queries.config import CrowdStrikeConfig
 
 logger = logging.getLogger(__name__)
 
-# Refresh token 60 seconds before actual expiry to prevent mid-request expiration
-TOKEN_REFRESH_BUFFER_SECONDS = 60
+
+# =============================================================================
+# Exceptions
+# =============================================================================
 
 
 class CrowdStrikeError(Exception):
     """Base exception for CrowdStrike API errors."""
+
     pass
 
 
 class AuthenticationError(CrowdStrikeError):
-    """Raised when authentication fails."""
+    """Raised when authentication or authorization fails (HTTP 401/403)."""
+
     pass
 
 
 class QuerySubmissionError(CrowdStrikeError):
     """Raised when query submission fails."""
+
     pass
 
 
 class QueryStatusError(CrowdStrikeError):
     """Raised when getting query status fails."""
+
     pass
+
+
+# =============================================================================
+# Client
+# =============================================================================
 
 
 class CrowdStrikeClient:
     """
     CrowdStrike NG-SIEM async API client.
-    
-    Uses FalconPy for OAuth2 authentication and aiohttp for async HTTP requests.
-    Provides methods for submitting queries, polling status, and retrieving results.
-    
+
+    Wraps FalconPy's NGSIEM service class with an async interface.
+    FalconPy handles OAuth2 authentication, automatic token refresh,
+    and HTTP session management. All API calls run on the thread pool
+    via ``asyncio.to_thread()`` to keep the event loop non-blocking.
+
     Attributes:
         base_url: CrowdStrike API base URL.
         repository: NG-SIEM repository name.
-    
+
     Example:
-        async with CrowdStrikeClient(credentials, config) as client:
+        client = CrowdStrikeClient(credentials, config)
+        try:
             job_id = await client.submit_query(query, start_time="-7d")
             status = await client.get_query_status(job_id)
+        finally:
+            await client.close()
     """
-    
+
     def __init__(
         self,
         credentials: Credentials,
@@ -68,155 +94,109 @@ class CrowdStrikeClient:
     ):
         """
         Initialize CrowdStrike client.
-        
+
+        Creates a FalconPy NGSIEM service class instance. Authentication
+        is deferred until the first API call (FalconPy's default behavior).
+
         Args:
-            credentials: OAuth2 credentials.
-            config: CrowdStrike API configuration.
-        
-        Raises:
-            AuthenticationError: If authentication fails.
+            credentials: OAuth2 credentials (client_id, client_secret).
+            config: CrowdStrike API configuration (base_url, repository).
         """
         self.base_url = config.base_url
         self.repository = config.repository
-        self._credentials = credentials
-        
-        # Initialize FalconPy OAuth2 client
-        self._oauth = OAuth2(
+        self._falcon = NGSIEM(
             client_id=credentials.client_id,
             client_secret=credentials.client_secret,
             base_url=config.base_url,
         )
-        
-        # Token state
-        self._access_token: str | None = None
-        self._token_expires_at: datetime | None = None
-        
-        # aiohttp session (created on first request or via context manager)
-        self._session: aiohttp.ClientSession | None = None
-        self._owns_session: bool = False
-        
-        # Get initial token (sync, runs once at init)
-        self._authenticate()
-    
-    async def __aenter__(self) -> "CrowdStrikeClient":
-        """Async context manager entry."""
-        self._session = aiohttp.ClientSession()
-        self._owns_session = True
-        return self
-    
-    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
-        """Async context manager exit."""
-        if self._session and self._owns_session:
-            await self._session.close()
-            self._session = None
-    
-    def _authenticate(self) -> None:
+
+    # -------------------------------------------------------------------------
+    # Response Handling
+    # -------------------------------------------------------------------------
+
+    @staticmethod
+    def _as_dict(response: dict[str, Any] | Any) -> dict[str, Any]:
         """
-        Authenticate and obtain access token.
-        
-        Raises:
-            AuthenticationError: If authentication fails.
-        """
-        response = self._oauth.token()
-        
-        if not isinstance(response, Result):
-            raise AuthenticationError(f"Unexpected response type from OAuth2: {type(response)}")
-        
-        if response.status_code not in (200, 201):
-            errors = response.body.get("errors", [])
-            error_msg = errors[0].get("message", "Unknown error") if errors else "Unknown error"
-            raise AuthenticationError(f"Authentication failed: {error_msg}")
-        
-        body = response.body
-        self._access_token = body["access_token"]
-        expires_in = body.get("expires_in", 1800)
-        self._token_expires_at = (
-            datetime.now(timezone.utc) 
-            + timedelta(seconds=expires_in - TOKEN_REFRESH_BUFFER_SECONDS)
-        )
-        logger.debug("Authentication successful, token expires at %s", self._token_expires_at)
-    
-    def _refresh_token(self) -> None:
-        """Refresh the access token if expired or about to expire."""
-        self._authenticate()
-    
-    async def _ensure_token_valid(self) -> None:
-        """Ensure the access token is valid, refreshing if necessary."""
-        if self._token_expires_at is None or datetime.now(timezone.utc) >= self._token_expires_at:
-            # Run sync FalconPy auth in thread pool to avoid blocking
-            await asyncio.to_thread(self._refresh_token)
-    
-    async def _get_session(self) -> aiohttp.ClientSession:
-        """Get or create the aiohttp session."""
-        if self._session is None:
-            self._session = aiohttp.ClientSession()
-            self._owns_session = True
-        return self._session
-    
-    async def _make_request(
-        self,
-        method: str,
-        endpoint: str,
-        json: dict[str, Any] | None = None,
-        params: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """
-        Make an async HTTP request to the CrowdStrike API.
-        
+        Ensure a FalconPy response is a plain dict.
+
+        FalconPy's return type is ``Union[dict, Result]``. We always use
+        default (non-pythonic) mode which returns dicts, but Pylance can't
+        know that statically. This method narrows the type.
+
+        Note: We intentionally avoid ``pythonic=True`` / ``Result`` because
+        the ``Result`` class normalizes response bodies into CrowdStrike's
+        standard envelope (meta/resources/errors), which strips NGSIEM-
+        specific fields like ``id``, ``done``, ``events``, and ``metaData``.
+
         Args:
-            method: HTTP method (GET, POST, DELETE).
-            endpoint: API endpoint path.
-            json: JSON body for POST requests.
-            params: Query parameters.
-        
+            response: FalconPy response (always a dict in default mode).
+
         Returns:
-            Response JSON as dictionary.
-        
+            The response as a plain dict.
+        """
+        if isinstance(response, dict):
+            return response
+        # Fallback: Result objects have a full_return property
+        return response.full_return  # type: ignore[union-attr]
+
+    def _check_response(self, response: dict[str, Any] | Any, operation: str) -> dict[str, Any]:
+        """
+        Validate a FalconPy response and extract the body.
+
+        FalconPy returns dicts with ``status_code``, ``headers``, and ``body``.
+        This method checks the status and returns the body on success, or
+        raises an appropriate exception on failure.
+
+        Args:
+            response: FalconPy response (dict or Result object).
+            operation: Human-readable operation name for error messages.
+
+        Returns:
+            The response body dictionary.
+
         Raises:
-            CrowdStrikeError: If the request fails.
+            AuthenticationError: On HTTP 401 or 403.
+            CrowdStrikeError: On any other non-2xx status.
         """
-        await self._ensure_token_valid()
-        
-        url = f"{self.base_url}{endpoint}"
-        headers = {
-            "Authorization": f"Bearer {self._access_token}",
-            "Content-Type": "application/json",
-        }
-        
-        session = await self._get_session()
-        
-        try:
-            async with session.request(
-                method=method,
-                url=url,
-                headers=headers,
-                json=json,
-                params=params,
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as response:
-                response.raise_for_status()
-                if response.content_length == 0:
-                    return {}
-                return await response.json()
-        except aiohttp.ClientError as e:
-            raise CrowdStrikeError(f"API request failed: {e}")
-    
-    def _build_cid_filter(self, cids: list[str]) -> str:
+        resp = self._as_dict(response)
+        status = resp.get("status_code", 0)
+        if status in (200, 201):
+            return resp.get("body", {})
+
+        body = resp.get("body", {})
+        errors = body.get("errors", [])
+        msg = errors[0].get("message", "Unknown error") if errors else str(body)
+
+        if status in (401, 403):
+            raise AuthenticationError(f"{operation}: {msg}")
+        raise CrowdStrikeError(f"{operation} failed (HTTP {status}): {msg}")
+
+    # -------------------------------------------------------------------------
+    # CID Filter
+    # -------------------------------------------------------------------------
+
+    @staticmethod
+    def _build_cid_filter(cids: list[str]) -> str:
         """
-        Build CID filter string for query.
-        
+        Build a LogScale CID filter string.
+
         Args:
             cids: List of CIDs to filter on.
-        
+
         Returns:
-            CID filter string to prepend to query.
+            CID filter string to prepend to a query, or empty string
+            if the list is empty.
         """
         if not cids:
             return ""
-        
+
         cid_list = ", ".join(f'"{cid}"' for cid in cids)
-        return f'cid =~ in(values=[{cid_list}])'
-    
+        return f"cid =~ in(values=[{cid_list}])"
+
+    # -------------------------------------------------------------------------
+    # API Methods
+    # -------------------------------------------------------------------------
+
     async def submit_query(
         self,
         query: str,
@@ -226,110 +206,125 @@ class CrowdStrikeClient:
     ) -> str:
         """
         Submit a query to NG-SIEM.
-        
+
         Args:
-            query: The query string.
-            start_time: Start time (e.g., "-7d", "2024-01-01T00:00:00Z").
-            end_time: End time (default "now").
+            query: The LogScale query string.
+            start_time: Search start (e.g., "-7d", "2024-01-01T00:00:00Z").
+            end_time: Search end (default "now").
             cids: Optional list of CIDs to filter on.
-        
+
         Returns:
             The job ID for polling status.
-        
+
         Raises:
+            AuthenticationError: If credentials are invalid.
             QuerySubmissionError: If query submission fails.
         """
         full_query = query
         if cids:
             cid_filter = self._build_cid_filter(cids)
             full_query = f"{cid_filter} | {query}"
-        
-        payload = {
-            "queryString": full_query,
-            "start": start_time,
-            "end": end_time,
-            "isLive": False,
-        }
-        
-        endpoint = f"/humio/api/v1/repositories/{self.repository}/queryjobs"
-        
+
+        response = await asyncio.to_thread(
+            self._falcon.start_search,
+            repository=self.repository,
+            query_string=full_query,
+            start=start_time,
+            end=end_time,
+            is_live=False,
+        )
+
         try:
-            response = await self._make_request(
-                method="POST",
-                endpoint=endpoint,
-                json=payload,
-            )
-            return response["id"]
-        except (CrowdStrikeError, KeyError) as e:
-            raise QuerySubmissionError(f"Failed to submit query: {e}")
-    
-    async def _get_job(self, job_id: str) -> dict[str, Any]:
-        """
-        Get job state from the API.
-        
-        Args:
-            job_id: The job ID to retrieve.
-        
-        Returns:
-            Job state dictionary with status, events, and metadata.
-        
-        Raises:
-            QueryStatusError: If retrieval fails.
-        """
-        endpoint = f"/humio/api/v1/repositories/{self.repository}/queryjobs/{job_id}"
-        
-        try:
-            return await self._make_request(method="GET", endpoint=endpoint)
+            body = self._check_response(response, "Query submission")
+        except AuthenticationError:
+            raise
         except CrowdStrikeError as e:
-            raise QueryStatusError(f"Failed to get job {job_id}: {e}")
-    
+            raise QuerySubmissionError(str(e)) from e
+
+        job_id = body.get("id")
+        if not job_id:
+            raise QuerySubmissionError("No job ID in response")
+
+        logger.debug("Submitted query, job_id=%s", job_id)
+        return job_id
+
     async def get_query_status(self, job_id: str) -> dict[str, Any]:
         """
         Get the status of a query job.
-        
+
+        The NG-SIEM API returns status and results in the same call.
+        The response includes ``done`` (bool), ``events`` (list), and
+        ``metaData`` (dict with ``eventCount``, etc.).
+
         Args:
             job_id: The job ID returned from submit_query.
-        
+
         Returns:
-            Status dictionary with 'done' flag and metadata.
-        
+            Status dictionary with 'done' flag, events, and metadata.
+
         Raises:
             QueryStatusError: If status retrieval fails.
         """
-        return await self._get_job(job_id)
-    
+        response = await asyncio.to_thread(
+            self._falcon.get_search_status,
+            repository=self.repository,
+            search_id=job_id,
+        )
+
+        try:
+            return self._check_response(response, "Query status")
+        except CrowdStrikeError as e:
+            raise QueryStatusError(str(e)) from e
+
     async def get_query_results(self, job_id: str) -> dict[str, Any]:
         """
         Get the results of a completed query.
-        
+
+        Delegates to ``get_query_status`` — the NG-SIEM API returns
+        status and results from the same endpoint.
+
         Args:
             job_id: The job ID returned from submit_query.
-        
+
         Returns:
             Results dictionary with 'events' list and metadata.
-        
+
         Raises:
             QueryStatusError: If result retrieval fails.
         """
-        return await self._get_job(job_id)
-    
+        return await self.get_query_status(job_id)
+
     async def cancel_query(self, job_id: str) -> None:
         """
-        Cancel a running query job.
-        
+        Cancel a running query job (best-effort).
+
+        Logs a warning on failure rather than raising, since the job
+        may already be complete or cancelled.
+
         Args:
             job_id: The job ID to cancel.
         """
-        endpoint = f"/humio/api/v1/repositories/{self.repository}/queryjobs/{job_id}"
-        
-        try:
-            await self._make_request(method="DELETE", endpoint=endpoint)
-        except CrowdStrikeError as e:
-            # Log but don't raise - job may already be complete or cancelled
-            logger.debug("Cancel request for job %s failed (may already be complete): %s", job_id, e)
-    
+        response = await asyncio.to_thread(
+            self._falcon.stop_search,
+            repository=self.repository,
+            id=job_id,
+        )
+
+        resp = self._as_dict(response)
+        status = resp.get("status_code", 0)
+        if status not in (200, 204):
+            logger.warning(
+                "Cancel query %s returned HTTP %s (may already be complete)",
+                job_id,
+                status,
+            )
+
     async def close(self) -> None:
-        """Close the client session. Call this if not using context manager."""
-        if self._session and self._owns_session:
-            await self._session.close()
-            self._session = None
+        """
+        Clean up resources.
+
+        FalconPy manages its own HTTP session internally, so this is
+        a no-op. Provided for interface compatibility with callers
+        that expect a cleanup method (e.g., runner.py).
+        """
+        pass
