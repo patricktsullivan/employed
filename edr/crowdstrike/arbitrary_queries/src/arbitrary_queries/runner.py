@@ -396,7 +396,16 @@ async def run(
         for summary in cid_summaries:
             logger.info(format_summary(summary))
     
-    # total_cids reflects actual CIDs queried, regardless of mode
+    # In batch mode, a single result covers all CIDs. Attribute the
+    # outcome to every CID that participated in the query.
+    if mode == ExecutionMode.BATCH and len(cid_infos) > 0:
+        if failed > 0:
+            successful = 0
+            failed = len(cid_infos)
+        else:
+            successful = len(cid_infos)
+            failed = 0
+    
     overall = OverallSummary(
         total_cids=len(cid_infos),
         successful_cids=successful,
