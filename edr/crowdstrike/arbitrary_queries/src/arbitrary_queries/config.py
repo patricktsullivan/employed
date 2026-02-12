@@ -54,12 +54,15 @@ class QueryDefaults:
     Default settings for query execution.
 
     Attributes:
-        time_range: Default time range for queries (e.g., "-7d").
+        time_range: Default relative time range for queries. Uses LogScale
+            format: positive values like ``"7d"`` (7 days ago), ``"24h"``
+            (24 hours ago). A leading dash (``"-7d"``) is automatically
+            stripped by the client but should be avoided in config.
         poll_interval_seconds: How often to poll for query status.
         timeout_seconds: Maximum time to wait for query completion.
     """
 
-    time_range: str = "-7d"
+    time_range: str = "7d"
     poll_interval_seconds: float = 60.0
     timeout_seconds: float = 3600.0
 
