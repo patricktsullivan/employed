@@ -65,9 +65,30 @@ def client(mock_credentials, mock_cs_config, mock_falcon):
 # =============================================================================
 
 
-def falcon_response(status_code: int, body: dict) -> dict:
-    """Build a FalconPy-style response dict."""
-    return {"status_code": status_code, "headers": {}, "body": body}
+def falcon_response(status_code: int, **payload) -> dict:
+    """
+    Build a FalconPy-style response dict.
+
+    FalconPy NGSIEM responses have ``status_code`` and ``headers`` at
+    the top level, alongside endpoint-specific payload keys::
+
+        start_search  → resources: {"id": "...", ...}
+        get_status    → body: {"done": ..., "events": [...]}
+        errors        → errors: [{"message": "..."}]
+
+    Usage::
+
+        falcon_response(200, resources={"id": "job-123"})
+        falcon_response(200, body={"done": True, "events": []})
+        falcon_response(401, errors=[{"message": "denied"}])
+    """
+    return {"status_code": status_code, "headers": {}, **payload}
+
+
+def falcon_search_response(status_code: int, job_id: str | None = None) -> dict:
+    """Build a FalconPy-style response for start_search."""
+    resources = {"id": job_id} if job_id else {}
+    return falcon_response(status_code, resources=resources)
 
 
 # =============================================================================
@@ -143,28 +164,34 @@ class TestAsDict:
 class TestCheckResponse:
     """Tests for _check_response method."""
 
-    def test_check_response_returns_body_on_200(self, client):
-        """_check_response should return body dict on HTTP 200."""
-        resp = falcon_response(200, {"id": "job-123", "done": False})
+    def test_check_response_returns_full_response_on_200(self, client):
+        """_check_response should return full response dict on HTTP 200."""
+        resp = falcon_response(200, resources={"id": "job-123"})
 
-        body = client._check_response(resp, "Test operation")
+        result = client._check_response(resp, "Test operation")
 
-        assert body == {"id": "job-123", "done": False}
+        assert result["status_code"] == 200
+        assert result["resources"] == {"id": "job-123"}
 
-    def test_check_response_returns_body_on_201(self, client):
-        """_check_response should return body dict on HTTP 201."""
-        resp = falcon_response(201, {"id": "job-456"})
+    def test_check_response_returns_full_response_on_201(self, client):
+        """_check_response should return full response dict on HTTP 201."""
+        resp = falcon_response(201, resources={"id": "job-456"})
 
-        body = client._check_response(resp, "Test operation")
+        result = client._check_response(resp, "Test operation")
 
-        assert body == {"id": "job-456"}
+        assert result["resources"]["id"] == "job-456"
+
+    def test_check_response_preserves_body_key(self, client):
+        """_check_response should preserve body key for status endpoints."""
+        resp = falcon_response(200, body={"done": True, "events": []})
+
+        result = client._check_response(resp, "Query status")
+
+        assert result["body"] == {"done": True, "events": []}
 
     def test_check_response_raises_auth_error_on_401(self, client):
         """_check_response should raise AuthenticationError on HTTP 401."""
-        resp = falcon_response(
-            401,
-            {"errors": [{"message": "access denied"}]},
-        )
+        resp = falcon_response(401, errors=[{"message": "access denied"}])
 
         with pytest.raises(AuthenticationError) as exc_info:
             client._check_response(resp, "Query submission")
@@ -174,10 +201,7 @@ class TestCheckResponse:
 
     def test_check_response_raises_auth_error_on_403(self, client):
         """_check_response should raise AuthenticationError on HTTP 403."""
-        resp = falcon_response(
-            403,
-            {"errors": [{"message": "insufficient scope"}]},
-        )
+        resp = falcon_response(403, errors=[{"message": "insufficient scope"}])
 
         with pytest.raises(AuthenticationError) as exc_info:
             client._check_response(resp, "Query submission")
@@ -187,7 +211,7 @@ class TestCheckResponse:
 
     def test_check_response_includes_http_status_in_auth_error(self, client):
         """_check_response should include HTTP status code in AuthenticationError."""
-        resp = falcon_response(403, {"errors": [{"message": "forbidden"}]})
+        resp = falcon_response(403, errors=[{"message": "forbidden"}])
 
         with pytest.raises(AuthenticationError) as exc_info:
             client._check_response(resp, "Query submission")
@@ -196,45 +220,52 @@ class TestCheckResponse:
 
     def test_check_response_raises_crowdstrike_error_on_500(self, client):
         """_check_response should raise CrowdStrikeError on HTTP 500."""
-        resp = falcon_response(
-            500,
-            {"errors": [{"message": "internal server error"}]},
-        )
+        resp = falcon_response(500, errors=[{"message": "internal server error"}])
 
         with pytest.raises(CrowdStrikeError) as exc_info:
             client._check_response(resp, "Query status")
 
         assert "500" in str(exc_info.value)
 
-    def test_check_response_handles_empty_body(self, client):
-        """_check_response should produce readable error for empty body."""
-        resp = falcon_response(401, {})
+    def test_check_response_handles_empty_response(self, client):
+        """_check_response should produce readable error for empty response."""
+        resp = falcon_response(401)
 
         with pytest.raises(AuthenticationError) as exc_info:
             client._check_response(resp, "Query submission")
 
-        # Should NOT be just "Query submission: {}"
         assert "Empty response body" in str(exc_info.value)
 
+    def test_check_response_finds_errors_inside_body(self, client):
+        """_check_response should find errors nested inside body key."""
+        resp = falcon_response(
+            403, body={"errors": [{"message": "nested error"}]}
+        )
+
+        with pytest.raises(AuthenticationError) as exc_info:
+            client._check_response(resp, "Test")
+
+        assert "nested error" in str(exc_info.value)
+
     def test_check_response_handles_empty_errors_list(self, client):
-        """_check_response should fall back to str(body) when errors list is empty."""
-        resp = falcon_response(429, {"errors": [], "message": "rate limited"})
+        """_check_response should fall back when errors list is empty."""
+        resp = falcon_response(429, errors=[])
 
         with pytest.raises(CrowdStrikeError) as exc_info:
             client._check_response(resp, "Query submission")
 
-        assert "rate limited" in str(exc_info.value)
+        assert "Empty response body" in str(exc_info.value)
 
     def test_check_response_handles_missing_status_code(self, client):
         """_check_response should treat missing status_code as failure."""
-        resp = {"body": {"id": "abc"}}
+        resp = {"resources": {"id": "abc"}}
 
         with pytest.raises(CrowdStrikeError):
             client._check_response(resp, "Test operation")
 
     def test_check_response_logs_debug_on_success(self, client, caplog):
         """_check_response should log response at DEBUG level."""
-        resp = falcon_response(200, {"id": "job-123"})
+        resp = falcon_response(200, resources={"id": "job-123"})
 
         import logging
 
@@ -246,9 +277,7 @@ class TestCheckResponse:
 
     def test_check_response_logs_error_on_auth_failure(self, client, caplog):
         """_check_response should log at ERROR level on auth failure."""
-        resp = falcon_response(
-            403, {"errors": [{"message": "forbidden"}]}
-        )
+        resp = falcon_response(403, errors=[{"message": "forbidden"}])
 
         import logging
 
@@ -257,6 +286,70 @@ class TestCheckResponse:
                 client._check_response(resp, "Query submission")
 
         assert "authorization failure" in caplog.text.lower()
+
+
+# =============================================================================
+# _extract_job_id
+# =============================================================================
+
+
+class TestExtractJobId:
+    """Tests for _extract_job_id static method."""
+
+    def test_extracts_id_from_resources_dict(self):
+        """_extract_job_id should extract id when resources is a dict."""
+        resp = {"status_code": 200, "headers": {}, "resources": {"id": "job-123"}}
+        assert CrowdStrikeClient._extract_job_id(resp) == "job-123"
+
+    def test_extracts_id_from_resources_list(self):
+        """_extract_job_id should extract id from resources list."""
+        resp = {"status_code": 200, "headers": {}, "resources": [{"id": "job-456"}]}
+        assert CrowdStrikeClient._extract_job_id(resp) == "job-456"
+
+    def test_returns_none_for_empty_resources_dict(self):
+        """_extract_job_id should return None for resources dict without id."""
+        resp = {"status_code": 200, "headers": {}, "resources": {"hashedQueryOnView": "abc"}}
+        assert CrowdStrikeClient._extract_job_id(resp) is None
+
+    def test_returns_none_for_empty_resources_list(self):
+        """_extract_job_id should return None for empty resources list."""
+        resp = {"status_code": 200, "headers": {}, "resources": []}
+        assert CrowdStrikeClient._extract_job_id(resp) is None
+
+    def test_returns_none_for_missing_resources(self):
+        """_extract_job_id should return None when resources key is absent."""
+        resp = {"status_code": 200, "headers": {}}
+        assert CrowdStrikeClient._extract_job_id(resp) is None
+
+    def test_fallback_to_body_id(self):
+        """_extract_job_id should fall back to body['id']."""
+        resp = {"status_code": 200, "headers": {}, "body": {"id": "job-789"}}
+        assert CrowdStrikeClient._extract_job_id(resp) == "job-789"
+
+    def test_fallback_to_top_level_id(self):
+        """_extract_job_id should fall back to top-level id."""
+        resp = {"status_code": 200, "headers": {}, "id": "job-abc"}
+        assert CrowdStrikeClient._extract_job_id(resp) == "job-abc"
+
+    def test_resources_dict_takes_priority(self):
+        """_extract_job_id should prefer resources dict over body or top-level."""
+        resp = {
+            "status_code": 200,
+            "headers": {},
+            "resources": {"id": "from-resources"},
+            "body": {"id": "from-body"},
+            "id": "from-top",
+        }
+        assert CrowdStrikeClient._extract_job_id(resp) == "from-resources"
+
+    def test_multiple_resources_returns_first(self):
+        """_extract_job_id should return id from first resource in list."""
+        resp = {
+            "status_code": 200,
+            "headers": {},
+            "resources": [{"id": "first"}, {"id": "second"}],
+        }
+        assert CrowdStrikeClient._extract_job_id(resp) == "first"
 
 
 # =============================================================================
@@ -357,13 +450,13 @@ class TestSubmitQuery:
     @pytest.mark.asyncio
     async def test_submit_query_success(self, client, mock_falcon):
         """submit_query should return job ID on success."""
-        mock_falcon.start_search.return_value = falcon_response(
-            200, {"id": "job-12345"}
+        mock_falcon.start_search.return_value = falcon_search_response(
+            200, job_id="job-12345"
         )
 
         job_id = await client.submit_query(
             query='#event_simpleName="ProcessRollup2"',
-            start_time="-7d",
+            start_time="7d",
         )
 
         assert job_id == "job-12345"
@@ -371,8 +464,8 @@ class TestSubmitQuery:
     @pytest.mark.asyncio
     async def test_submit_query_passes_correct_args(self, client, mock_falcon):
         """submit_query should pass correct arguments to FalconPy."""
-        mock_falcon.start_search.return_value = falcon_response(
-            200, {"id": "job-123"}
+        mock_falcon.start_search.return_value = falcon_search_response(
+            200, job_id="job-123"
         )
 
         await client.submit_query(
@@ -392,8 +485,8 @@ class TestSubmitQuery:
     @pytest.mark.asyncio
     async def test_submit_query_normalizes_dashed_start(self, client, mock_falcon):
         """submit_query should strip leading dash from relative start time."""
-        mock_falcon.start_search.return_value = falcon_response(
-            200, {"id": "job-123"}
+        mock_falcon.start_search.return_value = falcon_search_response(
+            200, job_id="job-123"
         )
 
         await client.submit_query(
@@ -409,8 +502,8 @@ class TestSubmitQuery:
     @pytest.mark.asyncio
     async def test_submit_query_normalizes_dashed_end(self, client, mock_falcon):
         """submit_query should strip leading dash from relative end time."""
-        mock_falcon.start_search.return_value = falcon_response(
-            200, {"id": "job-123"}
+        mock_falcon.start_search.return_value = falcon_search_response(
+            200, job_id="job-123"
         )
 
         await client.submit_query(
@@ -427,8 +520,8 @@ class TestSubmitQuery:
         self, client, mock_falcon
     ):
         """submit_query should not modify ISO 8601 timestamps."""
-        mock_falcon.start_search.return_value = falcon_response(
-            200, {"id": "job-123"}
+        mock_falcon.start_search.return_value = falcon_search_response(
+            200, job_id="job-123"
         )
 
         await client.submit_query(
@@ -444,13 +537,13 @@ class TestSubmitQuery:
     @pytest.mark.asyncio
     async def test_submit_query_with_cid_filter(self, client, mock_falcon):
         """submit_query should prepend CID filter when CIDs provided."""
-        mock_falcon.start_search.return_value = falcon_response(
-            200, {"id": "job-123"}
+        mock_falcon.start_search.return_value = falcon_search_response(
+            200, job_id="job-123"
         )
 
         await client.submit_query(
             query='#event_simpleName="Test"',
-            start_time="-7d",
+            start_time="7d",
             cids=["cid1", "cid2"],
         )
 
@@ -465,13 +558,13 @@ class TestSubmitQuery:
     @pytest.mark.asyncio
     async def test_submit_query_no_cid_filter_without_cids(self, client, mock_falcon):
         """submit_query should not add CID filter when cids is None."""
-        mock_falcon.start_search.return_value = falcon_response(
-            200, {"id": "job-123"}
+        mock_falcon.start_search.return_value = falcon_search_response(
+            200, job_id="job-123"
         )
 
         await client.submit_query(
             query='#event_simpleName="Test"',
-            start_time="-7d",
+            start_time="7d",
         )
 
         call_kwargs = mock_falcon.start_search.call_args[1]
@@ -481,64 +574,77 @@ class TestSubmitQuery:
     async def test_submit_query_auth_error_propagates(self, client, mock_falcon):
         """submit_query should propagate AuthenticationError from _check_response."""
         mock_falcon.start_search.return_value = falcon_response(
-            401, {"errors": [{"message": "invalid token"}]}
+            401, errors=[{"message": "invalid token"}]
         )
 
         with pytest.raises(AuthenticationError):
             await client.submit_query(
                 query='#event_simpleName="Test"',
-                start_time="-7d",
+                start_time="7d",
             )
 
     @pytest.mark.asyncio
     async def test_submit_query_wraps_non_auth_error(self, client, mock_falcon):
         """submit_query should wrap non-auth CrowdStrikeError as QuerySubmissionError."""
         mock_falcon.start_search.return_value = falcon_response(
-            500, {"errors": [{"message": "internal error"}]}
+            500, errors=[{"message": "internal error"}]
         )
 
         with pytest.raises(QuerySubmissionError):
             await client.submit_query(
                 query='#event_simpleName="Test"',
-                start_time="-7d",
+                start_time="7d",
             )
 
     @pytest.mark.asyncio
     async def test_submit_query_missing_job_id(self, client, mock_falcon):
-        """submit_query should raise QuerySubmissionError if response has no id."""
+        """submit_query should raise QuerySubmissionError if response has no id in resources."""
         mock_falcon.start_search.return_value = falcon_response(
-            200, {"status": "ok"}
+            200, resources={"hashedQueryOnView": "abc"}
         )
 
         with pytest.raises(QuerySubmissionError) as exc_info:
             await client.submit_query(
                 query='#event_simpleName="Test"',
-                start_time="-7d",
+                start_time="7d",
             )
 
         assert "no job id" in str(exc_info.value).lower()
 
     @pytest.mark.asyncio
-    async def test_submit_query_empty_body(self, client, mock_falcon):
-        """submit_query should raise QuerySubmissionError for empty body."""
-        mock_falcon.start_search.return_value = falcon_response(200, {})
+    async def test_submit_query_empty_resources(self, client, mock_falcon):
+        """submit_query should raise QuerySubmissionError for empty resources dict."""
+        mock_falcon.start_search.return_value = falcon_response(
+            200, resources={}
+        )
 
         with pytest.raises(QuerySubmissionError):
             await client.submit_query(
                 query='#event_simpleName="Test"',
-                start_time="-7d",
+                start_time="7d",
+            )
+
+    @pytest.mark.asyncio
+    async def test_submit_query_no_resources_key(self, client, mock_falcon):
+        """submit_query should raise QuerySubmissionError when resources key is missing."""
+        mock_falcon.start_search.return_value = falcon_response(200)
+
+        with pytest.raises(QuerySubmissionError):
+            await client.submit_query(
+                query='#event_simpleName="Test"',
+                start_time="7d",
             )
 
     @pytest.mark.asyncio
     async def test_submit_query_default_end_time(self, client, mock_falcon):
         """submit_query should default end_time to 'now'."""
-        mock_falcon.start_search.return_value = falcon_response(
-            200, {"id": "job-123"}
+        mock_falcon.start_search.return_value = falcon_search_response(
+            200, job_id="job-123"
         )
 
         await client.submit_query(
             query='#event_simpleName="Test"',
-            start_time="-7d",
+            start_time="7d",
         )
 
         call_kwargs = mock_falcon.start_search.call_args[1]
@@ -558,7 +664,7 @@ class TestGetQueryStatus:
         """get_query_status should return status for running query."""
         mock_falcon.get_search_status.return_value = falcon_response(
             200,
-            {
+            body={
                 "done": False,
                 "events": [],
                 "metaData": {"eventCount": 500, "processedEvents": 10000},
@@ -575,7 +681,7 @@ class TestGetQueryStatus:
         """get_query_status should return events when complete."""
         mock_falcon.get_search_status.return_value = falcon_response(
             200,
-            {
+            body={
                 "done": True,
                 "events": sample_events,
                 "metaData": {"eventCount": len(sample_events)},
@@ -591,7 +697,7 @@ class TestGetQueryStatus:
     async def test_get_query_status_passes_correct_args(self, client, mock_falcon):
         """get_query_status should pass job_id and repository to FalconPy."""
         mock_falcon.get_search_status.return_value = falcon_response(
-            200, {"done": True, "events": []}
+            200, body={"done": True, "events": []}
         )
 
         await client.get_query_status("job-abc")
@@ -607,7 +713,7 @@ class TestGetQueryStatus:
     ):
         """get_query_status should raise QueryStatusError on failure."""
         mock_falcon.get_search_status.return_value = falcon_response(
-            500, {"errors": [{"message": "internal error"}]}
+            500, errors=[{"message": "internal error"}]
         )
 
         with pytest.raises(QueryStatusError):
@@ -629,7 +735,7 @@ class TestGetQueryResults:
         """get_query_results should delegate to get_query_status."""
         mock_falcon.get_search_status.return_value = falcon_response(
             200,
-            {"done": True, "events": [{"a": 1}]},
+            body={"done": True, "events": [{"a": 1}]},
         )
 
         result = await client.get_query_results("job-123")
@@ -642,7 +748,7 @@ class TestGetQueryResults:
         """get_query_results should handle empty results."""
         mock_falcon.get_search_status.return_value = falcon_response(
             200,
-            {"done": True, "events": [], "metaData": {"eventCount": 0}},
+            body={"done": True, "events": [], "metaData": {"eventCount": 0}},
         )
 
         result = await client.get_query_results("job-123")
@@ -661,7 +767,7 @@ class TestCancelQuery:
     @pytest.mark.asyncio
     async def test_cancel_query_success(self, client, mock_falcon):
         """cancel_query should call stop_search with correct args."""
-        mock_falcon.stop_search.return_value = falcon_response(200, {})
+        mock_falcon.stop_search.return_value = falcon_response(200)
 
         await client.cancel_query("job-123")
 
@@ -676,7 +782,7 @@ class TestCancelQuery:
     ):
         """cancel_query should log warning for non-200/204 status."""
         mock_falcon.stop_search.return_value = falcon_response(
-            404, {"errors": [{"message": "not found"}]}
+            404, errors=[{"message": "not found"}]
         )
 
         import logging
@@ -691,7 +797,7 @@ class TestCancelQuery:
     async def test_cancel_query_does_not_raise(self, client, mock_falcon):
         """cancel_query should not raise even on error responses."""
         mock_falcon.stop_search.return_value = falcon_response(
-            500, {"errors": [{"message": "server error"}]}
+            500, errors=[{"message": "server error"}]
         )
 
         # Should not raise
@@ -700,7 +806,7 @@ class TestCancelQuery:
     @pytest.mark.asyncio
     async def test_cancel_query_accepts_204(self, client, mock_falcon, caplog):
         """cancel_query should accept HTTP 204 without warning."""
-        mock_falcon.stop_search.return_value = falcon_response(204, {})
+        mock_falcon.stop_search.return_value = falcon_response(204)
 
         import logging
 
