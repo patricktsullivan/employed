@@ -1,4 +1,4 @@
-# Arbitrary Queries
+# arbitrary-queries
 
 A Python CLI tool for running CrowdStrike NG-SIEM queries across multiple tenant environments (CIDs). Designed for MSSPs managing 200+ CrowdStrike environments through a parent-child hierarchy.
 
@@ -7,27 +7,11 @@ A Python CLI tool for running CrowdStrike NG-SIEM queries across multiple tenant
 - **Multi-tenant Queries**: Run NG-SIEM queries across all or selected customer environments
 - **Two Execution Modes**:
   - **Batch**: Single query with CID filter, produces one combined CSV
-  - **Iterative**: Separate query per CID with concurrency control, produces per-CID CSVs
-- **Secure Credential Management**: Uses 1Password CLI for API credentials
-- **Async Execution**: Efficient polling with configurable concurrency (up to 50 parallel queries)
+  - **Iterative**: Separate query per CID with async concurrency control, produces per-CID CSVs
+- **Secure Credential Management**: Uses 1Password CLI for API credentials — secrets are never stored in config files or environment variables
+- **Async Execution**: Efficient polling with configurable concurrency (up to 50 parallel queries) using `asyncio` and `aiohttp`
 - **Automatic Retries**: Configurable retry logic for transient failures
 - **Rich Output**: CSV exports with execution summaries
-
-## Design Decisions
-
-This section explains *why* the project is structured the way it is. If you're learning Python and want to understand the rationale behind the patterns used here, start here.
-
-**`src/` layout** — The project uses a `src/arbitrary_queries/` layout rather than putting modules at the repository root. This prevents accidental imports from the working directory and forces you to install the package (via `pip install -e .`) before running it, which mirrors how real-world packages work.
-
-**Dataclasses for models** — All data containers (`CIDInfo`, `QueryResult`, `QuerySummary`, etc.) use `@dataclass(frozen=True, slots=True)`. `frozen=True` makes instances immutable, which is critical because query results are shared across concurrent async tasks — mutation would cause race conditions. `slots=True` reduces memory overhead, which matters when tracking 200+ CIDs.
-
-**Async for queries** — CrowdStrike NG-SIEM queries are I/O-bound: you submit a query, then poll repeatedly until it completes. `asyncio` lets us poll dozens of queries concurrently without threads. The `Semaphore` in `run_iterative()` caps concurrency to avoid overwhelming the API.
-
-**1Password for secrets** — API credentials never touch config files, environment variables, or command-line arguments. The `op://` URI scheme lets us reference secrets by vault path. This is a best practice for security tooling: credentials exist only in memory for the duration of the process.
-
-**Tuples over lists for immutability** — Query result events are stored as `tuple[dict, ...]` rather than `list[dict]`. Lists are mutable, so a caller could accidentally `.append()` to results. Tuples enforce the contract that results are read-only after construction.
-
-**JSON as the default config format** — While YAML config is supported (and includes helpful inline comments), JSON is currently the default because our team is more familiar with it. YAML support was added as a learning exercise and will become the default in a future release, since YAML supports inline comments that make configuration self-documenting.
 
 ## Prerequisites
 
@@ -37,7 +21,7 @@ This section explains *why* the project is structured the way it is. If you're l
    # macOS
    brew install 1password-cli
 
-   # Linux - see https://developer.1password.com/docs/cli/get-started/
+   # Linux — see https://developer.1password.com/docs/cli/get-started/
    ```
 3. **CrowdStrike API Credentials** stored in 1Password:
    - API Client ID with NG-SIEM read permissions
@@ -48,7 +32,7 @@ This section explains *why* the project is structured the way it is. If you're l
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-org/arbitrary-queries.git
+git clone https://github.com/yourusername/arbitrary-queries.git
 cd arbitrary-queries
 
 # Install with pip (editable mode for development)
@@ -72,8 +56,6 @@ Edit `config/settings.json` (or `config/settings.yaml`) with your 1Password secr
   }
 }
 ```
-
-> **Tip:** If you prefer inline comments in your config, use `config/settings.yaml` instead. Pass it with `-c config/settings.yaml`.
 
 ### 2. Set Up CID Registry
 
@@ -118,7 +100,7 @@ arbitrary-queries -q queries/hunt.txt -v
 Create a filter file with CID identifiers or names (one per line):
 
 ```
-# targets.txt - Comments start with #
+# targets.txt — Comments start with #
 abc123def456abc123def456abc12345
 Acme Corporation
 Beta Industries
@@ -137,7 +119,7 @@ arbitrary-queries -q queries/hunt.txt -s "-24h"
 # Specific range
 arbitrary-queries -q queries/hunt.txt -s "-7d" -e "-1d"
 
-# Custom format
+# Absolute timestamps
 arbitrary-queries -q queries/hunt.txt -s "2024-01-01T00:00:00Z" -e "2024-01-07T23:59:59Z"
 ```
 
@@ -150,50 +132,94 @@ arbitrary-queries -q queries/hunt.txt -c config/production.yaml
 ## CLI Reference
 
 ```
-Usage: arbitrary-queries [OPTIONS]
+usage: arbitrary-queries [-h] [-c PATH] -q PATH [-m {batch,iterative}]
+                         [--cids PATH] [-s TIME] [-e TIME] [-v]
+```
 
-Options:
-  -c, --config PATH    Configuration file path [default: ./config/settings.json]
-  -q, --query PATH     Query file path (required)
-  -m, --mode TEXT      Execution mode: batch or iterative [default: batch]
-  --cids PATH          CID filter file (optional, runs all CIDs if not specified)
-  -s, --start TEXT     Query start time [default: from config, typically -7d]
-  -e, --end TEXT       Query end time [default: now]
-  -v, --verbose        Enable verbose output
+### Required Arguments
+
+| Flag | Description |
+|------|-------------|
+| `-q`, `--query PATH` | Path to the NG-SIEM query file |
+
+### Optional Arguments
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-c`, `--config PATH` | `./config/settings.json` | Path to configuration file (JSON or YAML) |
+| `-m`, `--mode {batch,iterative}` | `batch` | Execution mode: `batch` runs a single query with CID filter; `iterative` runs a separate query per CID with concurrency control |
+| `--cids PATH` | *(all CIDs)* | Path to CID filter file; if omitted, queries all CIDs in the registry |
+| `-s`, `--start TIME` | *(from config, typically `-7d`)* | Query start time (e.g., `-7d`, `-24h`, or an absolute timestamp) |
+| `-e`, `--end TIME` | `now` | Query end time |
+| `-v`, `--verbose` | `false` | Enable verbose output with per-CID details and tracebacks on error |
+| `--help` | | Show help message and exit |
+
+### Examples
+
+```bash
+# Minimal — just a query file (uses all defaults)
+arbitrary-queries -q queries/hunt.txt
+
+# Full options
+arbitrary-queries \
+  -c config/settings.yaml \
+  -q queries/hunt.txt \
+  -m iterative \
+  --cids data/target_cids.txt \
+  -s "-24h" \
+  -e "-1h" \
+  -v
+```
+
+## Output
+
+### CSV Files
+
+- **Batch mode**: Single CSV at `output/batch_results_YYYYMMDD_HHMMSS.csv`
+- **Iterative mode**: Per-CID CSVs at `output/<prefix>_YYYYMMDD_HHMMSS_<cid>.csv`
+
+CSV columns include all event fields from query results. In batch mode, `_cid` and `_cid_name` columns are appended for filtering.
+
+### Console Summary
+
+```
+=== Execution Summary ===
+Mode: BATCH
+Total CIDs: 15
+Successful: 14
+Failed: 1
+Total Records: 2,847
+Success Rate: 93.3%
+Total Execution Time: 245.67s
+
+Per-CID Results:
+  [SUCCESS] Acme Corporation (abc123...): 523 records in 12.3s
+  [SUCCESS] Beta Industries (def456...): 0 records in 8.1s
+  [FAILED]  Gamma Healthcare (789abc...): Query timeout
+  ...
 ```
 
 ## Configuration Reference
 
-| Section | Key | Default | Description |
-|---------|-----|---------|-------------|
-| `onepassword` | `client_id_ref` | *(required)* | `op://` reference for CrowdStrike client ID |
-| `onepassword` | `client_secret_ref` | *(required)* | `op://` reference for CrowdStrike client secret |
-| `crowdstrike` | `base_url` | `https://api.laggar.gcw.crowdstrike.com` | CrowdStrike API base URL |
+### settings.json / settings.yaml
+
+| Section | Field | Default | Description |
+|---------|-------|---------|-------------|
+| `onepassword` | `client_id_ref` | **(required)** | 1Password `op://` reference for API client ID |
+| `onepassword` | `client_secret_ref` | **(required)** | 1Password `op://` reference for API client secret |
+| `crowdstrike` | `base_url` | `https://api.laggar.gcw.crowdstrike.com` | CrowdStrike API base URL (cloud-specific) |
 | `crowdstrike` | `repository` | `search-all` | NG-SIEM repository name |
-| `query_defaults` | `time_range` | `-7d` | Default time range for queries |
-| `query_defaults` | `poll_interval_seconds` | `60` | Seconds between status polls |
-| `query_defaults` | `timeout_seconds` | `3600` | Max wait time per query |
+| `query_defaults` | `time_range` | `-7d` | Default query time range |
+| `query_defaults` | `poll_interval_seconds` | `60` | Polling interval for query status (seconds) |
+| `query_defaults` | `timeout_seconds` | `3600` | Maximum query wait time (seconds) |
 | `concurrency` | `max_concurrent_queries` | `50` | Max parallel queries (iterative mode) |
-| `concurrency` | `retry_attempts` | `3` | Retry count for transient failures |
-| `concurrency` | `retry_delay_seconds` | `5` | Delay between retries |
-| `paths` | `cid_registry_path` | `./data/cid_registry.json` | CID to name mapping file |
+| `concurrency` | `retry_attempts` | `3` | Retry count for failed queries |
+| `concurrency` | `retry_delay_seconds` | `5` | Delay between retries (seconds) |
+| `paths` | `cid_registry_path` | `./data/cid_registry.json` | CID-to-name mapping file |
 | `paths` | `queries_dir` | `./queries` | Query files directory |
 | `paths` | `output_dir` | `./output` | CSV output directory |
 
 ## Development
-
-### Running Tests
-
-```bash
-# Run all tests
-pytest
-
-# With coverage
-pytest --cov=arbitrary_queries --cov-report=html
-
-# Run specific test file
-pytest tests/test_client.py -v
-```
 
 ### Project Structure
 
@@ -201,32 +227,59 @@ pytest tests/test_client.py -v
 arbitrary-queries/
 ├── src/
 │   └── arbitrary_queries/
-│       ├── __init__.py       # Package version
-│       ├── models.py         # Data classes (CIDInfo, QueryResult, etc.)
-│       ├── secrets.py        # 1Password CLI integration
-│       ├── config.py         # Configuration loading (JSON/YAML)
-│       ├── client.py         # CrowdStrike API wrapper (async)
-│       ├── query_executor.py # Async query execution and polling
-│       ├── output.py         # CSV and summary generation
-│       ├── runner.py         # Main orchestration
-│       └── cli.py            # CLI entry point (argparse)
-├── tests/                    # Test suite (pytest)
-│   ├── conftest.py           # Shared fixtures
+│       ├── __init__.py         # Package version
+│       ├── models.py           # Frozen dataclasses (CIDInfo, QueryResult, etc.)
+│       ├── secrets.py          # 1Password CLI integration
+│       ├── config.py           # Configuration loading (JSON/YAML)
+│       ├── client.py           # CrowdStrike NG-SIEM async API client
+│       ├── query_executor.py   # Async query execution with concurrency control
+│       ├── output.py           # CSV generation and summary formatting
+│       ├── runner.py           # Main orchestration
+│       └── cli.py              # CLI entry point (argparse)
+├── tests/                      # Test suite — see tests/README.md
+│   ├── conftest.py             # Shared pytest fixtures
 │   ├── test_models.py
 │   ├── test_secrets.py
 │   ├── test_config.py
 │   ├── test_client.py
 │   ├── test_query_executor.py
 │   ├── test_output.py
-│   ├── test_runner.py
-│   └── test_cli.py
-├── config/                   # Configuration files
-│   ├── settings.json         # Default config (JSON)
-│   └── settings.yaml         # Alternative config (YAML, with comments)
-├── queries/                  # Query files
-├── data/                     # CID registry
-└── output/                   # Generated CSVs (gitignored)
+│   ├── test_cli.py
+│   └── README.md               # Testing architecture and guide
+├── config/                     # Configuration templates
+│   ├── settings.json
+│   └── settings.yaml
+├── queries/                    # NG-SIEM query files
+├── data/                       # CID registry
+│   └── cid_registry.json
+├── output/                     # Generated CSVs (gitignored)
+├── pyproject.toml              # Project metadata and dependencies
+└── README.md
 ```
+
+### Running Tests
+
+Install the dev dependencies first, then run the test suite:
+
+```bash
+# Install with dev dependencies (pytest, coverage, etc.)
+pip install -e ".[dev]"
+
+# Run all tests
+pytest
+
+# With coverage report
+pytest --cov=arbitrary_queries --cov-report=html
+
+# Run a specific test file
+pytest tests/test_client.py -v
+
+# Run a specific test class or method
+pytest tests/test_models.py::TestCIDInfo -v
+pytest tests/test_cli.py::TestMain::test_main_success -v
+```
+
+For details on the testing architecture, fixtures, and what each test file covers, see [`tests/README.md`](tests/README.md).
 
 ## Troubleshooting
 
@@ -250,7 +303,7 @@ eval $(op signin)
 
 - Increase `timeout_seconds` in configuration
 - Narrow time range with `-s` flag
-- Add more specific filters to query
+- Add more specific filters to your query
 
 ### Rate Limiting
 
@@ -259,8 +312,4 @@ eval $(op signin)
 
 ## License
 
-This project is licensed under the GNU General Public License v3.0 — see the [LICENSE](LICENSE) file for details.
-
-## Contributing
-
-Contributions are welcome. Please open an issue to discuss proposed changes before submitting a pull request. All code should include tests and follow the existing PEP 8 conventions used throughout the project.
+This project is licensed under the [GNU General Public License v3.0](LICENSE).
